@@ -11,23 +11,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Install v141_xp toolset
+      - name: Install Visual Studio v141 XP
         shell: powershell
         run: |
           $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
-
           & $setup modify `
             --quiet `
             --norestart `
             --installPath "C:\Program Files\Microsoft Visual Studio\2022\Enterprise" `
             --add Microsoft.VisualStudio.Component.WinXP
-
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "Visual Studio installer returned: $LASTEXITCODE"
+            throw "v141 XP installation failed: $LASTEXITCODE"
           }
+
+      - name: Install WDK 17763
+        shell: powershell
+        run: |
+          $url = "https://download.microsoft.com/download/1/4/0/140EBDB7-F631-4191-9DC0-31C8ECB8A11F/wdk/wdksetup.exe"
+          $file = "$env:TEMP\wdksetup.exe"
+          Invoke-WebRequest -Uri $url -OutFile $file
+          Start-Process $file -ArgumentList "/features","/q","/norestart" -Wait
+          if ($LASTEXITCODE -ne 0) {
+            throw "WDK installation failed: $LASTEXITCODE"
+          }
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
 
       - name: Build solution
         run: |
