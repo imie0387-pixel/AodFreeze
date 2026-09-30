@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-2019
+    runs-on: windows-2022
 
     steps:
       - name: Checkout
@@ -14,11 +14,24 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Show MSBuild
-        run: msbuild -version
+      - name: Install v141_xp toolset
+        shell: powershell
+        run: |
+          $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+
+          & $setup modify `
+            --quiet `
+            --norestart `
+            --installPath "C:\Program Files\Microsoft Visual Studio\2022\Enterprise" `
+            --add Microsoft.VisualStudio.Component.WinXP
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Visual Studio installer returned: $LASTEXITCODE"
+          }
 
       - name: Build solution
-        run: msbuild DiskFilter.sln /p:Configuration=Release /p:Platform=x64 /m
+        run: |
+          msbuild DiskFilter.sln /p:Configuration=Release /p:Platform=x64 /m
 
       - name: Show build output
         shell: pwsh
