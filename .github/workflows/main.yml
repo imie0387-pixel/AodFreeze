@@ -20,19 +20,49 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       - name: Build driver x64
-        run: msbuild DiskFilter\DiskFilter.vcxproj /p:Configuration=Release /p:Platform=x64 /m
+        run: |
+          msbuild DiskFilter\DiskFilter.vcxproj `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /m
 
       - name: Prepare DistDriver
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path DistDriver\amd64
-          Copy-Item DiskFilter\x64\Release\diskflt.sys DistDriver\amd64\diskflt.sys -Force
+          New-Item -ItemType Directory -Force -Path DistDriver\i386
+
+          Copy-Item `
+            DiskFilter\x64\Release\diskflt.sys `
+            DistDriver\amd64\diskflt.sys `
+            -Force
+
+          Copy-Item `
+            DiskFilter\x64\Release\diskflt.sys `
+            DistDriver\i386\diskflt.sys `
+            -Force
+
+          Write-Host "DistDriver contents:"
+          Get-ChildItem DistDriver -Recurse
 
       - name: Build management tools
-        run: msbuild DiskFilter.sln /p:Configuration=Release /p:Platform=x64 /m
+        run: |
+          msbuild DiskFilter.sln `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /m
 
       - name: Show build output
         shell: pwsh
         run: |
-          Get-ChildItem -Path . -Recurse -Include *.sys,*.exe |
+          Write-Host "=== SYS ==="
+          Get-ChildItem -Path . -Recurse -Include *.sys |
+            Select-Object FullName,Length
+
+          Write-Host "=== EXE ==="
+          Get-ChildItem -Path . -Recurse -Include *.exe |
+            Select-Object FullName,Length
+
+          Write-Host "=== CAT ==="
+          Get-ChildItem -Path . -Recurse -Include *.cat |
             Select-Object FullName,Length
