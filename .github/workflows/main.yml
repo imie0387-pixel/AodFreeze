@@ -19,7 +19,21 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Build solution
+      - name: Build driver Win32
+        run: msbuild DiskFilter\DiskFilter.vcxproj /p:Configuration=Release /p:Platform=Win32 /m
+
+      - name: Build driver x64
+        run: msbuild DiskFilter\DiskFilter.vcxproj /p:Configuration=Release /p:Platform=x64 /m
+
+      - name: Prepare DistDriver
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path DistDriver\i386
+          New-Item -ItemType Directory -Force -Path DistDriver\amd64
+          Copy-Item DiskFilter\Release\diskflt.sys DistDriver\i386\diskflt.sys -Force
+          Copy-Item DiskFilter\x64\Release\diskflt.sys DistDriver\amd64\diskflt.sys -Force
+
+      - name: Build management tools
         run: msbuild DiskFilter.sln /p:Configuration=Release /p:Platform=x64 /m
 
       - name: Show build output
