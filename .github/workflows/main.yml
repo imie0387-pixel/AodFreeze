@@ -1,0 +1,24 @@
+name: Build AodFreeze
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build solution
+        run: msbuild DiskFilter.sln /p:Configuration=Release /p:Platform=x64 /m
+
+      - name: Show build output
+        shell: pwsh
+        run: |
+          Get-ChildItem -Path . -Recurse -Include *.sys,*.exe |
+            Select-Object FullName,Length
