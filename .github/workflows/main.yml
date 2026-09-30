@@ -11,13 +11,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install v141 XP
+        uses: thepwrtank18/install-vs-components@v1.0.0
+        with:
+          components: Microsoft.VisualStudio.Component.WinXP
+
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Build
-        shell: cmd
-        run: |
-          msbuild DiskFilter.sln /p:Configuration=Release /p:Platform=x64 /m
+      - name: Build solution
+        run: msbuild DiskFilter.sln /p:Configuration=Release /p:Platform=x64 /m
 
       - name: Show build output
         shell: pwsh
