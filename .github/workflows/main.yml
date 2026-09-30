@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-2022
+    runs-on: windows-2019
 
     steps:
       - name: Checkout
@@ -13,6 +13,9 @@ jobs:
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
+
+      - name: Show MSBuild
+        run: msbuild -version
 
       - name: Build solution
         run: msbuild DiskFilter.sln /p:Configuration=Release /p:Platform=x64 /m
