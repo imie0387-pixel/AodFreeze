@@ -24,6 +24,7 @@ jobs:
           msbuild DiskFilter\DiskFilter.vcxproj `
             /p:Configuration=Release `
             /p:Platform=x64 `
+            /p:EnableInfVerif=false `
             /m
 
       - name: Prepare DistDriver
@@ -50,6 +51,7 @@ jobs:
           msbuild DiskFilter.sln `
             /p:Configuration=Release `
             /p:Platform=x64 `
+            /p:EnableInfVerif=false `
             /m
 
       - name: Show build output
