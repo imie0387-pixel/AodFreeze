@@ -25,6 +25,7 @@ jobs:
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:EnableInfVerif=false `
+            /p:InfVerifEnabled=false `
             /m
 
       - name: Prepare DistDriver
@@ -52,6 +53,7 @@ jobs:
             /p:Configuration=Release `
             /p:Platform=x64 `
             /p:EnableInfVerif=false `
+            /p:InfVerifEnabled=false `
             /m
 
       - name: Show build output
