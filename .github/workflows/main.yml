@@ -29,6 +29,32 @@ jobs:
             /p:SkipPackageVerification=true `
             /m
 
+      - name: Prepare DistDriver
+        shell: pwsh
+        run: |
+          Remove-Item DistDriver -Recurse -Force -ErrorAction SilentlyContinue
+
+          New-Item -ItemType Directory -Force -Path DistDriver\amd64
+          New-Item -ItemType Directory -Force -Path DistDriver\i386
+
+          Copy-Item `
+            DiskFilter\x64\Release\diskflt.sys `
+            DistDriver\amd64\diskflt.sys `
+            -Force
+
+          Copy-Item `
+            DiskFilter\x64\Release\diskflt.sys `
+            DistDriver\i386\diskflt.sys `
+            -Force
+
+          Copy-Item `
+            DiskFilter\x64\Release\DiskFilter\diskflt.inf `
+            DistDriver\diskflt.inf `
+            -Force
+
+          Write-Host "=== DISTDRIVER ==="
+          Get-ChildItem DistDriver -Recurse
+
       - name: Build management tools
         run: |
           msbuild DiskFilter.sln `
@@ -90,9 +116,14 @@ jobs:
         shell: pwsh
         run: |
           $certDir = "Signing"
-          New-Item -ItemType Directory -Force -Path $certDir | Out-Null
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $certDir | Out-Null
 
           $passwordText = "AodFreeze-Test-2026!"
+
           $password = ConvertTo-SecureString `
             $passwordText `
             -AsPlainText `
@@ -137,36 +168,10 @@ jobs:
             -Encoding utf8 `
             -Append
 
-      - name: Prepare DistDriver
-        shell: pwsh
-        run: |
-          Remove-Item DistDriver -Recurse -Force -ErrorAction SilentlyContinue
-
-          New-Item -ItemType Directory -Force -Path DistDriver\amd64
-          New-Item -ItemType Directory -Force -Path DistDriver\i386
-
-          Copy-Item `
-            DiskFilter\x64\Release\diskflt.sys `
-            DistDriver\amd64\diskflt.sys `
-            -Force
-
-          Copy-Item `
-            DiskFilter\x64\Release\diskflt.sys `
-            DistDriver\i386\diskflt.sys `
-            -Force
-
-          Copy-Item `
-            DiskFilter\x64\Release\DiskFilter\diskflt.inf `
-            DistDriver\diskflt.inf `
-            -Force
-
-          Write-Host "Initial DistDriver contents:"
-          Get-ChildItem DistDriver -Recurse
-
       - name: Sign driver SYS
         shell: pwsh
         run: |
-          Write-Host "Signing amd64 diskflt.sys..."
+          Write-Host "=== SIGN AMD64 SYS ==="
 
           & "$env:SIGNTOOL" sign `
             /v `
@@ -179,7 +184,7 @@ jobs:
             throw "Signing amd64 diskflt.sys failed"
           }
 
-          Write-Host "Signing i386 diskflt.sys..."
+          Write-Host "=== SIGN I386 SYS ==="
 
           & "$env:SIGNTOOL" sign `
             /v `
@@ -242,7 +247,7 @@ jobs:
             -Force `
             -ErrorAction SilentlyContinue
 
-          Write-Host "Generating catalog with signed SYS files..."
+          Write-Host "=== GENERATE CAT ==="
 
           & "$env:INF2CAT" `
             /driver:"$PWD\DistDriver" `
@@ -258,14 +263,15 @@ jobs:
             throw "Inf2Cat did not create DistDriver\diskflt.cat"
           }
 
-          Write-Host "Catalog created:"
+          Write-Host "Catalog created."
+
           Get-Item "DistDriver\diskflt.cat" |
             Select-Object FullName,Length
 
       - name: Sign catalog
         shell: pwsh
         run: |
-          Write-Host "Signing diskflt.cat..."
+          Write-Host "=== SIGN CAT ==="
 
           & "$env:SIGNTOOL" sign `
             /v `
@@ -294,7 +300,7 @@ jobs:
             throw "Catalog verification failed"
           }
 
-          Write-Host "=== VERIFY SYS AGAINST CAT ==="
+          Write-Host "=== VERIFY AMD64 SYS AGAINST CAT ==="
 
           & "$env:SIGNTOOL" verify `
             /v `
@@ -313,11 +319,26 @@ jobs:
         run: |
           $package = "AodFreeze-package"
 
-          Remove-Item $package -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item `
+            $package `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
 
-          New-Item -ItemType Directory -Force -Path "$package\Driver\amd64"
-          New-Item -ItemType Directory -Force -Path "$package\Driver\i386"
-          New-Item -ItemType Directory -Force -Path "$package\Tools"
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path "$package\Driver\amd64"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path "$package\Driver\i386"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path "$package\Tools"
 
           Copy-Item `
             "DistDriver\diskflt.inf" `
@@ -399,7 +420,9 @@ jobs:
 
           This is a development/test package.
           It is NOT a Microsoft production-signed driver.
-          "@ | Set-Content "$package\README.txt" -Encoding UTF8
+          "@ | Set-Content `
+            "$package\README.txt" `
+            -Encoding UTF8
 
           Write-Host "=== PACKAGE ==="
           Get-ChildItem $package -Recurse
@@ -410,16 +433,20 @@ jobs:
             -Force
 
           Write-Host "=== ZIP ==="
-          Get-Item "AodFreeze-package-signed-test.zip" |
+
+          Get-Item `
+            "AodFreeze-package-signed-test.zip" |
             Select-Object FullName,Length
 
       - name: Show signatures and hashes
         shell: pwsh
         run: |
-          Write-Host "=== SYS SIGNATURES ==="
+          Write-Host "=== AMD64 SYS SIGNATURE ==="
 
           Get-AuthenticodeSignature `
             "AodFreeze-package\Driver\amd64\diskflt.sys"
+
+          Write-Host "=== I386 SYS SIGNATURE ==="
 
           Get-AuthenticodeSignature `
             "AodFreeze-package\Driver\i386\diskflt.sys"
@@ -429,15 +456,19 @@ jobs:
           Get-AuthenticodeSignature `
             "AodFreeze-package\Driver\diskflt.cat"
 
-          Write-Host "=== SHA256 ==="
+          Write-Host "=== SHA256 SYS ==="
 
           Get-FileHash `
             "AodFreeze-package\Driver\amd64\diskflt.sys" `
             -Algorithm SHA256
 
+          Write-Host "=== SHA256 CAT ==="
+
           Get-FileHash `
             "AodFreeze-package\Driver\diskflt.cat" `
             -Algorithm SHA256
+
+          Write-Host "=== SHA256 ZIP ==="
 
           Get-FileHash `
             "AodFreeze-package-signed-test.zip" `
