@@ -19,6 +19,20 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      - name: Inspect WindowsDriver.common.targets
+        shell: pwsh
+        run: |
+          $file = "C:\Program Files (x86)\Windows Kits\10\build\10.0.26100.0\WindowsDriver.common.targets"
+          $lines = Get-Content $file
+          $start = 675
+          $end = 705
+
+          Write-Host "=== WindowsDriver.common.targets $start-$end ==="
+
+          for ($i = $start; $i -le $end; $i++) {
+            "{0}: {1}" -f ($i + 1), $lines[$i]
+          }
+
       - name: Build driver x64
         run: |
           msbuild DiskFilter\DiskFilter.vcxproj `
