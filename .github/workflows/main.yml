@@ -25,10 +25,12 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           Write-Host "=== RUNNER ==="
+
           Get-CimInstance Win32_OperatingSystem |
             Select-Object Caption, Version, BuildNumber
 
           Write-Host "=== WINDOWS KITS ==="
+
           $kits = "${env:ProgramFiles(x86)}\Windows Kits\10"
 
           if (-not (Test-Path $kits)) {
@@ -271,11 +273,13 @@ jobs:
 
           Import-Certificate `
             -FilePath "AodFreeze-Test.cer" `
-            -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
+            -CertStoreLocation "Cert:\LocalMachine\Root" |
+            Out-Null
 
           Import-Certificate `
             -FilePath "AodFreeze-Test.cer" `
-            -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" | Out-Null
+            -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" |
+            Out-Null
 
           Write-Host "Test certificate imported into Root and TrustedPublisher."
 
@@ -306,19 +310,19 @@ jobs:
 
           Write-Host "SYS SIGN OK."
 
-      - name: Verify embedded SYS signature
+      - name: Verify embedded SYS test signature
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
           $path = "DistDriver\diskflt.sys"
 
-          Write-Host "=== SIGNTOOL KERNEL VERIFICATION ==="
+          Write-Host "=== SIGNTOOL TEST-SIGNATURE VERIFICATION ==="
 
-          & $env:SIGNTOOL verify /v /kp $path
+          & $env:SIGNTOOL verify /v /pa $path
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Kernel-mode signature verification failed for $path"
+            throw "Test-signature verification failed for ${path}"
           }
 
           Write-Host "=== POWERSHELL SIGNATURE VERIFICATION ==="
@@ -332,7 +336,7 @@ jobs:
             throw "PowerShell signature verification failed for ${path}: $($signature.Status)"
           }
 
-          Write-Host "Embedded SYS signature is valid."
+          Write-Host "Embedded SYS test signature is valid."
 
       - name: Regenerate catalog after SYS signing
         shell: pwsh
@@ -378,7 +382,7 @@ jobs:
             throw "DrvCat failed with exit code $LASTEXITCODE"
           }
 
-          Write-Host "Catalog regenerated from the SIGNED SYS file."
+          Write-Host "Catalog regenerated from the signed SYS file."
 
       - name: Sign catalog
         shell: pwsh
@@ -414,7 +418,7 @@ jobs:
           $inf = "DistDriver\diskflt.inf"
           $sys = "DistDriver\diskflt.sys"
 
-          Write-Host "=== VERIFY CATALOG SIGNATURE ==="
+          Write-Host "=== VERIFY CATALOG TEST SIGNATURE ==="
 
           & $env:SIGNTOOL verify /v /pa $catalog
 
@@ -438,15 +442,15 @@ jobs:
             throw "SYS/catalog verification failed."
           }
 
-          Write-Host "=== VERIFY EMBEDDED SYS SIGNATURE ==="
+          Write-Host "=== VERIFY EMBEDDED SYS TEST SIGNATURE ==="
 
-          & $env:SIGNTOOL verify /v /kp $sys
+          & $env:SIGNTOOL verify /v /pa $sys
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Embedded SYS kernel signature verification failed."
+            throw "Embedded SYS test-signature verification failed."
           }
 
-          Write-Host "All driver signature and catalog checks passed."
+          Write-Host "All driver test-signature and catalog checks passed."
 
       - name: Prepare AodFreeze package
         shell: pwsh
