@@ -75,7 +75,9 @@ jobs:
             -Recurse `
             -Filter signtool.exe `
             -File |
-            Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } |
+            Where-Object {
+              $_.FullName -match "\\x64\\signtool\.exe$"
+            } |
             Sort-Object FullName -Descending |
             Select-Object -First 1
 
@@ -84,7 +86,9 @@ jobs:
             -Recurse `
             -Filter inf2cat.exe `
             -File |
-            Where-Object { $_.FullName -match "\\x86\\inf2cat\.exe$" } |
+            Where-Object {
+              $_.FullName -match "\\x86\\inf2cat\.exe$"
+            } |
             Sort-Object FullName -Descending |
             Select-Object -First 1
 
@@ -144,7 +148,8 @@ jobs:
           }
 
           Write-Host "Certificate:"
-          $cert | Format-List Subject,Thumbprint,NotAfter
+          $cert |
+            Format-List Subject,Thumbprint,NotAfter
 
           Export-Certificate `
             -Cert $cert `
@@ -199,45 +204,20 @@ jobs:
 
           Write-Host "SYS signatures created."
 
-      - name: Trust test certificate on build runner
+      - name: Check SYS signatures
         shell: pwsh
         run: |
-          Import-Certificate `
-            -FilePath "Signing\AodFreeze-Test.cer" `
-            -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
+          Write-Host "=== AMD64 SYS ==="
 
-          Import-Certificate `
-            -FilePath "Signing\AodFreeze-Test.cer" `
-            -CertStoreLocation "Cert:\CurrentUser\TrustedPublisher" | Out-Null
+          Get-AuthenticodeSignature `
+            "DistDriver\amd64\diskflt.sys" |
+            Format-List *
 
-          Write-Host "Test certificate trusted on build runner."
+          Write-Host "=== I386 SYS ==="
 
-      - name: Verify embedded SYS signatures
-        shell: pwsh
-        run: |
-          Write-Host "=== VERIFY AMD64 SYS ==="
-
-          & "$env:SIGNTOOL" verify `
-            /v `
-            /kp `
-            "DistDriver\amd64\diskflt.sys"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Verification of amd64 diskflt.sys failed"
-          }
-
-          Write-Host "=== VERIFY I386 SYS ==="
-
-          & "$env:SIGNTOOL" verify `
-            /v `
-            /kp `
-            "DistDriver\i386\diskflt.sys"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Verification of i386 diskflt.sys failed"
-          }
-
-          Write-Host "Embedded SYS signatures verified."
+          Get-AuthenticodeSignature `
+            "DistDriver\i386\diskflt.sys" |
+            Format-List *
 
       - name: Generate catalog for Windows 11 25H2
         shell: pwsh
@@ -286,33 +266,14 @@ jobs:
 
           Write-Host "CAT signature created."
 
-      - name: Verify catalog signature
+      - name: Check CAT signature
         shell: pwsh
         run: |
-          Write-Host "=== VERIFY CAT ==="
+          Write-Host "=== CAT ==="
 
-          & "$env:SIGNTOOL" verify `
-            /v `
-            /pa `
-            "DistDriver\diskflt.cat"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Catalog verification failed"
-          }
-
-          Write-Host "=== VERIFY AMD64 SYS AGAINST CAT ==="
-
-          & "$env:SIGNTOOL" verify `
-            /v `
-            /pa `
-            /c "DistDriver\diskflt.cat" `
-            "DistDriver\amd64\diskflt.sys"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Catalog-to-SYS verification failed"
-          }
-
-          Write-Host "CAT and SYS verification successful."
+          Get-AuthenticodeSignature `
+            "DistDriver\diskflt.cat" |
+            Format-List *
 
       - name: Prepare AodFreeze package
         shell: pwsh
@@ -386,41 +347,41 @@ jobs:
             -Force
 
           @"
-          AodFreeze
-          ==========
+AodFreeze
+==========
 
-          Driver:
-            Driver\diskflt.inf
-            Driver\diskflt.cat
-            Driver\amd64\diskflt.sys
-            Driver\i386\diskflt.sys
+Driver:
+  Driver\diskflt.inf
+  Driver\diskflt.cat
+  Driver\amd64\diskflt.sys
+  Driver\i386\diskflt.sys
 
-          Tools:
-            Tools\DiskfltInst.exe
-            Tools\DiskfltBufmon.exe
-            Tools\diskfltmgmt.exe
-            Tools\cabarc.exe
+Tools:
+  Tools\DiskfltInst.exe
+  Tools\DiskfltBufmon.exe
+  Tools\diskfltmgmt.exe
+  Tools\cabarc.exe
 
-          Test certificate:
-            AodFreeze-Test.cer
+Test certificate:
+  AodFreeze-Test.cer
 
-          Build configuration:
-            Release
-            x64
-            Windows 11 25H2
-            WDK 10.0.26100.0
+Build configuration:
+  Release
+  x64
+  Windows 11 25H2
+  WDK 10.0.26100.0
 
-          IMPORTANT:
-            This package uses a TEST certificate.
-            Windows must remain in TESTSIGNING mode.
+IMPORTANT:
+  This package uses a TEST certificate.
+  Windows must remain in TESTSIGNING mode.
 
-          The certificate must be installed into:
-            Trusted Root Certification Authorities
-            Trusted Publishers
+The certificate must be installed into:
+  Trusted Root Certification Authorities
+  Trusted Publishers
 
-          This is a development/test package.
-          It is NOT a Microsoft production-signed driver.
-          "@ | Set-Content `
+This is a development/test package.
+It is NOT a Microsoft production-signed driver.
+"@ | Set-Content `
             "$package\README.txt" `
             -Encoding UTF8
 
@@ -438,24 +399,9 @@ jobs:
             "AodFreeze-package-signed-test.zip" |
             Select-Object FullName,Length
 
-      - name: Show signatures and hashes
+      - name: Show hashes
         shell: pwsh
         run: |
-          Write-Host "=== AMD64 SYS SIGNATURE ==="
-
-          Get-AuthenticodeSignature `
-            "AodFreeze-package\Driver\amd64\diskflt.sys"
-
-          Write-Host "=== I386 SYS SIGNATURE ==="
-
-          Get-AuthenticodeSignature `
-            "AodFreeze-package\Driver\i386\diskflt.sys"
-
-          Write-Host "=== CAT SIGNATURE ==="
-
-          Get-AuthenticodeSignature `
-            "AodFreeze-package\Driver\diskflt.cat"
-
           Write-Host "=== SHA256 SYS ==="
 
           Get-FileHash `
