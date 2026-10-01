@@ -6,7 +6,9 @@
 
 #ifndef PCH_H
 #define PCH_H
-
+#ifndef E_BOUNDS
+#define E_BOUNDS 0x8000000B
+#endif
 // add headers that you want to pre-compile here
 #include "framework.h"
 #include <afxwin.h>
