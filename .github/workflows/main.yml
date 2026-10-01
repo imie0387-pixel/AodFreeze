@@ -45,6 +45,16 @@ jobs:
             DistDriver\i386\diskflt.sys `
             -Force
 
+          Copy-Item `
+            DiskFilter\x64\Release\DiskFilter\diskflt.inf `
+            DistDriver\diskflt.inf `
+            -Force
+
+          Copy-Item `
+            DiskFilter\x64\Release\DiskFilter\diskflt.cat `
+            DistDriver\diskflt.cat `
+            -Force
+
           Write-Host "DistDriver contents:"
           Get-ChildItem DistDriver -Recurse
 
@@ -57,6 +67,93 @@ jobs:
             /p:InfVerifEnabled=false `
             /p:SkipPackageVerification=true `
             /m
+
+      - name: Prepare AodFreeze package
+        shell: pwsh
+        run: |
+          $package = "AodFreeze-package"
+
+          Remove-Item $package -Recurse -Force -ErrorAction SilentlyContinue
+
+          New-Item -ItemType Directory -Force -Path "$package\Driver\amd64"
+          New-Item -ItemType Directory -Force -Path "$package\Driver\i386"
+          New-Item -ItemType Directory -Force -Path "$package\Tools"
+
+          Copy-Item `
+            "DiskFilter\x64\Release\DiskFilter\diskflt.inf" `
+            "$package\Driver\diskflt.inf" `
+            -Force
+
+          Copy-Item `
+            "DiskFilter\x64\Release\DiskFilter\diskflt.cat" `
+            "$package\Driver\diskflt.cat" `
+            -Force
+
+          Copy-Item `
+            "DiskFilter\x64\Release\diskflt.sys" `
+            "$package\Driver\amd64\diskflt.sys" `
+            -Force
+
+          Copy-Item `
+            "DiskFilter\x64\Release\diskflt.sys" `
+            "$package\Driver\i386\diskflt.sys" `
+            -Force
+
+          Copy-Item `
+            "x64\Release\DiskfltInst.exe" `
+            "$package\Tools\DiskfltInst.exe" `
+            -Force
+
+          Copy-Item `
+            "x64\Release\DiskfltBufmon.exe" `
+            "$package\Tools\DiskfltBufmon.exe" `
+            -Force
+
+          Copy-Item `
+            "x64\Release\diskfltmgmt.exe" `
+            "$package\Tools\diskfltmgmt.exe" `
+            -Force
+
+          Copy-Item `
+            "cabarc.exe" `
+            "$package\Tools\cabarc.exe" `
+            -Force
+
+          @"
+          AodFreeze
+          ==========
+
+          Driver:
+            Driver\diskflt.inf
+            Driver\diskflt.cat
+            Driver\amd64\diskflt.sys
+            Driver\i386\diskflt.sys
+
+          Tools:
+            Tools\DiskfltInst.exe
+            Tools\DiskfltBufmon.exe
+            Tools\diskfltmgmt.exe
+            Tools\cabarc.exe
+
+          Build configuration:
+            Release
+            x64
+            Windows 11 / WDK 10.0.26100.0
+
+          This package was built by GitHub Actions.
+          "@ | Set-Content "$package\README.txt" -Encoding UTF8
+
+          Write-Host "=== PACKAGE ==="
+          Get-ChildItem $package -Recurse
+
+          Compress-Archive `
+            -Path "$package\*" `
+            -DestinationPath "AodFreeze-package.zip" `
+            -Force
+
+          Write-Host "=== ZIP ==="
+          Get-Item "AodFreeze-package.zip" |
+            Select-Object FullName, Length
 
       - name: Show build output
         shell: pwsh
@@ -72,3 +169,15 @@ jobs:
           Write-Host "=== CAT ==="
           Get-ChildItem -Path . -Recurse -Include *.cat |
             Select-Object FullName,Length
+
+          Write-Host "=== ZIP ==="
+          Get-Item AodFreeze-package.zip |
+            Select-Object FullName,Length
+
+      - name: Upload AodFreeze package
+        uses: actions/upload-artifact@v4
+        with:
+          name: AodFreeze-package
+          path: AodFreeze-package.zip
+          if-no-files-found: error
+          retention-days: 30
