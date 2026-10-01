@@ -37,129 +37,148 @@ jobs:
             throw "Visual Studio setup.exe not found: $setup"
           }
 
-          $vsPath = (& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1).Trim()
+          $vsPath = (& $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath |
+            Select-Object -First 1).Trim()
 
           if (-not $vsPath) {
             throw "Visual Studio installation path could not be detected."
           }
 
-          $v141Installed = [bool](
-            & $vswhere -latest -products * `
-              -requires Microsoft.VisualStudio.Component.VC.v141.x86.x64 `
-              -property installationPath 2>$null
-          )
-
-          $xpInstalled = [bool](
-            & $vswhere -latest -products * `
-              -requires Microsoft.VisualStudio.Component.WinXP `
-              -property installationPath 2>$null
-          )
-
-          $mfcInstalled = [bool](
-            & $vswhere -latest -products * `
-              -requires Microsoft.VisualStudio.Component.VC.v141.MFC `
-              -property installationPath 2>$null
-          )
-
           Write-Host "VS path: $vsPath"
-          Write-Host "v141: $v141Installed"
-          Write-Host "WinXP: $xpInstalled"
-          Write-Host "v141 MFC: $mfcInstalled"
 
-          if (-not ($v141Installed -and $xpInstalled -and $mfcInstalled)) {
-
-            $configPath = Join-Path $env:RUNNER_TEMP "aodfreeze-vsconfig.json"
-
-            $config = @{
-              version = "1.0"
-              components = @(
-                "Microsoft.VisualStudio.Component.VC.v141.x86.x64"
-                "Microsoft.VisualStudio.Component.WinXP"
-                "Microsoft.VisualStudio.Component.VC.v141.MFC"
-              )
-            }
-
-            $config |
-              ConvertTo-Json -Depth 5 |
-              Set-Content -Path $configPath -Encoding UTF8
-
-            Write-Host "=== VS CONFIG ==="
-            Get-Content $configPath
-
-            $psi = [System.Diagnostics.ProcessStartInfo]::new()
-            $psi.FileName = $setup
-            $psi.UseShellExecute = $false
-            $psi.CreateNoWindow = $true
-
-            [void]$psi.ArgumentList.Add("modify")
-            [void]$psi.ArgumentList.Add("--installPath")
-            [void]$psi.ArgumentList.Add($vsPath)
-            [void]$psi.ArgumentList.Add("--channelId")
-            [void]$psi.ArgumentList.Add("VisualStudio.17.Release")
-            [void]$psi.ArgumentList.Add("--config")
-            [void]$psi.ArgumentList.Add($configPath)
-            [void]$psi.ArgumentList.Add("--quiet")
-            [void]$psi.ArgumentList.Add("--norestart")
-
-            Write-Host "=== STARTING VISUAL STUDIO INSTALLER ==="
-
-            $process = [System.Diagnostics.Process]::Start($psi)
-
-            if (-not $process) {
-              throw "Failed to start Visual Studio Installer."
-            }
-
-            $process.WaitForExit()
-
-            if ($process.ExitCode -notin @(0, 3010, 1641)) {
-              throw "Visual Studio component installation failed with exit code $($process.ExitCode)"
-            }
-          }
-
-          Start-Sleep -Seconds 2
-
-          $v141Installed = [bool](
-            & $vswhere -latest -products * `
-              -requires Microsoft.VisualStudio.Component.VC.v141.x86.x64 `
-              -property installationPath 2>$null
-          )
-
-          $xpInstalled = [bool](
-            & $vswhere -latest -products * `
-              -requires Microsoft.VisualStudio.Component.WinXP `
-              -property installationPath 2>$null
-          )
-
-          $mfcInstalled = [bool](
-            & $vswhere -latest -products * `
-              -requires Microsoft.VisualStudio.Component.VC.v141.MFC `
-              -property installationPath 2>$null
-          )
-
-          if (-not $v141Installed) {
-            throw "Microsoft.VisualStudio.Component.VC.v141.x86.x64 is NOT installed."
-          }
-
-          if (-not $xpInstalled) {
-            throw "Microsoft.VisualStudio.Component.WinXP is NOT installed."
-          }
-
-          if (-not $mfcInstalled) {
-            throw "Microsoft.VisualStudio.Component.VC.v141.MFC is NOT installed."
-          }
+          $v141Root = Join-Path $vsPath "VC\Tools\MSVC\14.16"
 
           $afxwin = Get-ChildItem `
-            "$vsPath\VC\Tools\MSVC\14.16\*\atlmfc\include\afxwin.h" `
+            "$v141Root\*\atlmfc\include\afxwin.h" `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          $v141Cl = Get-ChildItem `
+            "$v141Root\*\bin\Hostx64\x64\cl.exe" `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          $v141Link = Get-ChildItem `
+            "$v141Root\*\bin\Hostx64\x64\link.exe" `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          if ($afxwin -and $v141Cl -and $v141Link) {
+            Write-Host "v141 + MFC already present."
+            Write-Host "afxwin.h: $($afxwin.FullName)"
+            Write-Host "cl.exe: $($v141Cl.FullName)"
+            Write-Host "link.exe: $($v141Link.FullName)"
+          }
+          else {
+            Write-Host "Required v141 components are missing."
+            Write-Host "Installing directly with Visual Studio setup.exe..."
+
+            $components = @(
+              "Microsoft.VisualStudio.Component.VC.v141.x86.x64",
+              "Microsoft.VisualStudio.Component.VC.v141.MFC",
+              "Microsoft.VisualStudio.Component.WinXP"
+            )
+
+            foreach ($component in $components) {
+
+              Write-Host "=== INSTALLING $component ==="
+
+              $psi = [System.Diagnostics.ProcessStartInfo]::new()
+              $psi.FileName = $setup
+              $psi.UseShellExecute = $false
+              $psi.CreateNoWindow = $true
+
+              [void]$psi.ArgumentList.Add("modify")
+              [void]$psi.ArgumentList.Add("--installPath")
+              [void]$psi.ArgumentList.Add($vsPath)
+              [void]$psi.ArgumentList.Add("--add")
+              [void]$psi.ArgumentList.Add($component)
+              [void]$psi.ArgumentList.Add("--quiet")
+              [void]$psi.ArgumentList.Add("--norestart")
+
+              $process = [System.Diagnostics.Process]::Start($psi)
+
+              if (-not $process) {
+                throw "Failed to start Visual Studio Installer for $component."
+              }
+
+              $process.WaitForExit()
+
+              Write-Host "Installer exit code for $component`: $($process.ExitCode)"
+
+              if ($process.ExitCode -notin @(0, 3010, 1641)) {
+                throw "Visual Studio component installation failed for $component with exit code $($process.ExitCode)"
+              }
+
+              Start-Sleep -Seconds 2
+            }
+          }
+
+          Write-Host "=== VERIFYING v141 FILES ==="
+
+          $afxwin = Get-ChildItem `
+            "$v141Root\*\atlmfc\include\afxwin.h" `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          $v141Cl = Get-ChildItem `
+            "$v141Root\*\bin\Hostx64\x64\cl.exe" `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          $v141Link = Get-ChildItem `
+            "$v141Root\*\bin\Hostx64\x64\link.exe" `
             -File `
             -ErrorAction SilentlyContinue |
             Select-Object -First 1
 
           if (-not $afxwin) {
-            throw "afxwin.h was not found in the v141 MFC installation."
+            throw "afxwin.h was not found after v141 MFC installation."
           }
 
-          Write-Host "v141 + WinXP + v141 MFC verified."
+          if (-not $v141Cl) {
+            throw "v141 cl.exe was not found after installation."
+          }
+
+          if (-not $v141Link) {
+            throw "v141 link.exe was not found after installation."
+          }
+
+          Write-Host "v141 + MFC verified."
           Write-Host "afxwin.h: $($afxwin.FullName)"
+          Write-Host "cl.exe: $($v141Cl.FullName)"
+          Write-Host "link.exe: $($v141Link.FullName)"
+
+          Write-Host "=== VSWER COMPONENT CHECK ==="
+
+          $v141Installed = [bool](
+            & $vswhere -latest -products * `
+              -requires Microsoft.VisualStudio.Component.VC.v141.x86.x64 `
+              -property installationPath 2>$null
+          )
+
+          $xpInstalled = [bool](
+            & $vswhere -latest -products * `
+              -requires Microsoft.VisualStudio.Component.WinXP `
+              -property installationPath 2>$null
+          )
+
+          $mfcInstalled = [bool](
+            & $vswhere -latest -products * `
+              -requires Microsoft.VisualStudio.Component.VC.v141.MFC `
+              -property installationPath 2>$null
+          )
+
+          Write-Host "v141 according to vswhere: $v141Installed"
+          Write-Host "WinXP according to vswhere: $xpInstalled"
+          Write-Host "v141 MFC according to vswhere: $mfcInstalled"
+
+          Write-Host "v141 + MFC file verification passed."
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -403,15 +422,13 @@ jobs:
             "DistDriver\i386\diskflt.sys" `
             -Algorithm SHA256
 
-          Write-Host "=== SIGNATURE STATUS ==="
-
           Get-AuthenticodeSignature `
             "DistDriver\amd64\diskflt.sys" |
-            Format-List Status, SignerCertificate
+            Format-List Status,SignerCertificate
 
           Get-AuthenticodeSignature `
             "DistDriver\i386\diskflt.sys" |
-            Format-List Status, SignerCertificate
+            Format-List Status,SignerCertificate
 
       - name: Build solution
         shell: pwsh
@@ -465,7 +482,7 @@ jobs:
 
           Write-Host "Installer SHA256: $($installerHash.Hash)"
 
-          Write-Host "The installer was built after the signed SYS was placed in DistDriver."
+          Write-Host "Installer was built after signed SYS copies were prepared."
 
       - name: Verify embedded SYS test signature
         shell: pwsh
@@ -474,8 +491,6 @@ jobs:
 
           $path = Join-Path $PWD "DistDriver\diskflt.sys"
 
-          # /pa is correct for a test-signed embedded driver signature.
-          # Do not use /kp here.
           & $env:SIGNTOOL_PATH verify /v /pa $path
 
           if ($LASTEXITCODE -ne 0) {
@@ -514,7 +529,6 @@ jobs:
 
           $dist = Join-Path $PWD "DistDriver"
 
-          # Already proven to work with this WDK/project.
           & $inf2cat `
             /driver:"$dist" `
             /os:10_x64 `
@@ -630,9 +644,6 @@ jobs:
             -Force `
             -Path $driverDir, $toolsDir |
             Out-Null
-
-          # Final package layout matches the build-generated INF:
-          # diskflt.sys is at Driver root.
 
           Copy-Item `
             "DistDriver\diskflt.inf" `
