@@ -30,7 +30,7 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           Write-Host "=============================================="
-          Write-Host "PRECHECK WINDOWS KITS / WDK"
+          Write-Host "WINDOWS SDK / WDK CHECK"
           Write-Host "=============================================="
 
           $kitsRoot = $null
@@ -65,7 +65,7 @@ jobs:
             )
 
             $kitsRoot = $candidates |
-              Where-Object { Test-Path $_ } |
+              Where-Object { $_ -and (Test-Path $_) } |
               Select-Object -First 1
           }
 
@@ -83,70 +83,70 @@ jobs:
             throw "Windows Kits bin directory not found: $binRoot"
           }
 
-          Write-Host ""
-          Write-Host "Installed Windows Kits versions:"
-
-          Get-ChildItem $binRoot -Directory |
-            Sort-Object Name |
-            Select-Object FullName
-
-          Write-Host ""
-          Write-Host "Searching for WDK 10.0.26100.0 tools..."
-
           $requiredBin = Join-Path $binRoot "10.0.26100.0"
 
           if (-not (Test-Path $requiredBin)) {
             throw "Required Windows Kit 10.0.26100.0 not found: $requiredBin"
           }
 
-          $signtoolCandidates = @(
-            Get-ChildItem `
-              -Path $requiredBin `
-              -Recurse `
-              -File `
-              -Filter "signtool.exe" `
-              -ErrorAction SilentlyContinue
-          )
+          Write-Host ""
+          Write-Host "Required WDK/SDK directory:"
+          Write-Host $requiredBin
 
-          $inf2catCandidates = @(
-            Get-ChildItem `
-              -Path $requiredBin `
-              -Recurse `
-              -File `
-              -Filter "inf2cat.exe" `
-              -ErrorAction SilentlyContinue
-          )
+          Write-Host ""
+          Write-Host "Available tool architectures:"
 
-          if ($signtoolCandidates.Count -eq 0) {
-            throw "signtool.exe not found in WDK 10.0.26100.0."
-          }
+          Get-ChildItem `
+            $requiredBin `
+            -Directory |
+            Sort-Object Name |
+            Select-Object Name, FullName
 
-          if ($inf2catCandidates.Count -eq 0) {
-            throw "inf2cat.exe not found in WDK 10.0.26100.0."
-          }
+          # IMPORTANT:
+          # The GitHub runner is x64.
+          # Never automatically select arm64 SignTool.
+          $signtool = Join-Path `
+            $requiredBin `
+            "x64\signtool.exe"
 
-          $signtool = $signtoolCandidates |
-            Sort-Object FullName |
-            Select-Object -First 1
-
-          $inf2cat = $inf2catCandidates |
-            Sort-Object FullName |
-            Select-Object -First 1
+          # Use the x86 Inf2Cat variant that was already known
+          # to work with this WDK on the GitHub runner.
+          $inf2cat = Join-Path `
+            $requiredBin `
+            "x86\inf2cat.exe"
 
           Write-Host ""
           Write-Host "Selected SignTool:"
-          Write-Host $signtool.FullName
+          Write-Host $signtool
 
           Write-Host ""
           Write-Host "Selected Inf2Cat:"
-          Write-Host $inf2cat.FullName
+          Write-Host $inf2cat
 
-          if (-not (Test-Path $signtool.FullName)) {
-            throw "Selected signtool.exe does not exist."
+          if (-not (Test-Path $signtool)) {
+            throw "Required x64 SignTool not found: $signtool"
           }
 
-          if (-not (Test-Path $inf2cat.FullName)) {
-            throw "Selected inf2cat.exe does not exist."
+          if (-not (Test-Path $inf2cat)) {
+            throw "Required x86 Inf2Cat not found: $inf2cat"
+          }
+
+          Write-Host ""
+          Write-Host "Testing SignTool executable..."
+
+          & $signtool /?
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "x64 SignTool could not be executed."
+          }
+
+          Write-Host ""
+          Write-Host "Testing Inf2Cat executable..."
+
+          & $inf2cat /?
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "x86 Inf2Cat could not be executed."
           }
 
           "KITS_ROOT=$kitsRoot" |
@@ -155,20 +155,20 @@ jobs:
               -Append `
               -Encoding utf8
 
-          "INF2CAT=$($inf2cat.FullName)" |
+          "INF2CAT=$inf2cat" |
             Out-File `
               -FilePath $env:GITHUB_ENV `
               -Append `
               -Encoding utf8
 
-          "SIGNTOOL=$($signtool.FullName)" |
+          "SIGNTOOL=$signtool" |
             Out-File `
               -FilePath $env:GITHUB_ENV `
               -Append `
               -Encoding utf8
 
           Write-Host ""
-          Write-Host "WDK PRECHECK OK."
+          Write-Host "WINDOWS SDK / WDK CHECK OK."
 
       - name: Build driver x64
         shell: pwsh
@@ -195,6 +195,7 @@ jobs:
             throw "diskflt.sys was not produced."
           }
 
+          Write-Host ""
           Write-Host "Driver build OK."
 
       - name: Prepare DistDriver
@@ -263,6 +264,7 @@ jobs:
             }
           }
 
+          Write-Host ""
           Write-Host "DistDriver OK."
 
       - name: Build management tools
@@ -296,6 +298,7 @@ jobs:
             }
           }
 
+          Write-Host ""
           Write-Host "Management tools build OK."
 
       - name: Create test signing certificate
@@ -407,6 +410,7 @@ jobs:
               -Append `
               -Encoding utf8
 
+          Write-Host ""
           Write-Host "Test certificate created."
 
       - name: Sign driver SYS
@@ -425,6 +429,10 @@ jobs:
           if (-not (Test-Path "$env:PFX_PATH")) {
             throw "PFX not found: $env:PFX_PATH"
           }
+
+          Write-Host ""
+          Write-Host "Using x64 SignTool:"
+          Write-Host $env:SIGNTOOL
 
           $sysFiles = @(
             "DistDriver\amd64\diskflt.sys",
@@ -453,10 +461,12 @@ jobs:
               throw "Signing failed for $sys"
             }
 
-            Write-Host "SIGN OK: $sys"
+            Write-Host ""
+            Write-Host "SIGN OK:"
+            Write-Host $sys
           }
 
-      - name: Trust test certificate on runner
+      - name: Trust test certificate on build runner
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -479,6 +489,7 @@ jobs:
             -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" |
             Out-Null
 
+          Write-Host ""
           Write-Host "Certificate imported into Trusted Root."
           Write-Host "Certificate imported into Trusted Publishers."
 
@@ -488,7 +499,7 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           Write-Host "=============================================="
-          Write-Host "VERIFY SYS SIGNATURES"
+          Write-Host "VERIFY EMBEDDED SYS SIGNATURES"
           Write-Host "=============================================="
 
           $sysFiles = @(
@@ -509,22 +520,26 @@ jobs:
               "$sys"
 
             if ($LASTEXITCODE -eq 0) {
-              Write-Host "SIGNTOOL /pa VERIFY OK."
+              Write-Host ""
+              Write-Host "SignTool /pa verification OK."
             }
             else {
               Write-Host ""
-              Write-Host "Standard /pa verification did not accept the test certificate."
-              Write-Host "Checking embedded Authenticode signature..."
+              Write-Host "Standard /pa verification returned non-zero."
+              Write-Host "Checking Authenticode status..."
 
               $signature = Get-AuthenticodeSignature `
                 -FilePath $sys
 
-              Write-Host "Authenticode status: $($signature.Status)"
+              Write-Host ""
+              Write-Host "Authenticode status:"
+              Write-Host $signature.Status
 
               if ($signature.Status -ne "Valid") {
                 throw "Embedded signature is not valid for $sys. Status=$($signature.Status)"
               }
 
+              Write-Host ""
               Write-Host "Embedded signature is VALID."
             }
           }
@@ -541,12 +556,16 @@ jobs:
           $driverDir = (Resolve-Path "DistDriver").Path
 
           Write-Host ""
-          Write-Host "Inf2Cat:"
+          Write-Host "Using Inf2Cat:"
           Write-Host $env:INF2CAT
 
           Write-Host ""
           Write-Host "Driver directory:"
           Write-Host $driverDir
+
+          Write-Host ""
+          Write-Host "Target:"
+          Write-Host "Windows 11 25H2 x64"
 
           Write-Host ""
           Write-Host "OS identifier:"
@@ -578,6 +597,7 @@ jobs:
           $catFiles |
             Select-Object FullName, Length
 
+          Write-Host ""
           Write-Host "Inf2Cat OK."
 
       - name: Sign catalog
@@ -618,6 +638,7 @@ jobs:
               throw "Catalog signing failed for $($cat.FullName)"
             }
 
+            Write-Host ""
             Write-Host "CATALOG SIGN OK."
           }
 
@@ -627,7 +648,7 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           Write-Host "=============================================="
-          Write-Host "VERIFY CATALOG"
+          Write-Host "VERIFY CATALOG SIGNATURE"
           Write-Host "=============================================="
 
           $catFiles = @(
@@ -650,18 +671,22 @@ jobs:
               "$($cat.FullName)"
 
             if ($LASTEXITCODE -eq 0) {
-              Write-Host "CATALOG /pa VERIFY OK."
+              Write-Host ""
+              Write-Host "Catalog /pa verification OK."
             }
             else {
               $signature = Get-AuthenticodeSignature `
                 -FilePath $cat.FullName
 
-              Write-Host "Authenticode status: $($signature.Status)"
+              Write-Host ""
+              Write-Host "Authenticode status:"
+              Write-Host $signature.Status
 
               if ($signature.Status -ne "Valid") {
                 throw "Catalog signature is not valid: $($cat.FullName)"
               }
 
+              Write-Host ""
               Write-Host "Embedded catalog signature is VALID."
             }
           }
@@ -747,51 +772,51 @@ jobs:
             -Force
 
           @"
-          AodFreeze
-          =========
+AodFreeze
+=========
 
-          TEST BUILD
+TEST BUILD
 
-          Driver:
-            Driver\diskflt.inf
-            Driver\diskflt.cat
-            Driver\amd64\diskflt.sys
-            Driver\i386\diskflt.sys
+Driver:
+  Driver\diskflt.inf
+  Driver\diskflt.cat
+  Driver\amd64\diskflt.sys
+  Driver\i386\diskflt.sys
 
-          Tools:
-            Tools\DiskfltInst.exe
-            Tools\DiskfltBufmon.exe
-            Tools\diskfltmgmt.exe
-            Tools\cabarc.exe
+Tools:
+  Tools\DiskfltInst.exe
+  Tools\DiskfltBufmon.exe
+  Tools\diskfltmgmt.exe
+  Tools\cabarc.exe
 
-          Test certificate:
-            AodFreeze-Test.cer
+Test certificate:
+  AodFreeze-Test.cer
 
-          Target:
-            Windows 11 25H2 x64
+Target:
+  Windows 11 25H2 x64
 
-          Inf2Cat:
-            /os:10_25H2_X64
+Inf2Cat:
+  /os:10_25H2_X64
 
-          Signing:
-            SHA256
-            Self-signed TEST certificate
+Signing:
+  SHA256
+  Self-signed TEST certificate
 
-          IMPORTANT:
-            This package contains a TEST-SIGNED kernel driver.
+IMPORTANT:
+  This package contains a TEST-SIGNED kernel driver.
 
-            Before testing:
-            1. Enable Windows Test Mode.
-            2. Install AodFreeze-Test.cer into:
-               Local Machine\Trusted Root Certification Authorities
-            3. Install AodFreeze-Test.cer into:
-               Local Machine\Trusted Publishers
-            4. Install the driver package.
+Before testing:
+  1. Enable Windows Test Mode.
+  2. Install AodFreeze-Test.cer into:
+     Local Machine\Trusted Root Certification Authorities
+  3. Install AodFreeze-Test.cer into:
+     Local Machine\Trusted Publishers
+  4. Install the driver package.
 
-          This is NOT a production/Microsoft-signed driver package.
+This is NOT a production/Microsoft-signed driver package.
 
-          This package was built by GitHub Actions.
-          "@ |
+This package was built by GitHub Actions.
+"@ |
             Set-Content `
               "$package\README.txt" `
               -Encoding UTF8
