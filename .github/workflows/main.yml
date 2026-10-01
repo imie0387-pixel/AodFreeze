@@ -8,7 +8,6 @@ jobs:
     runs-on: windows-2022
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -25,39 +24,157 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Check Windows SDK and WDK
+      - name: Preflight Windows Kits and WDK tools
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host ""
           Write-Host "=============================================="
-          Write-Host "WINDOWS SDK / WDK CHECK"
+          Write-Host "PRECHECK WINDOWS KITS / WDK"
           Write-Host "=============================================="
 
-          $kitsRoot = "$env:ProgramFiles(x86)\Windows Kits\10"
+          $kitsRoot = $null
 
-          if (-not (Test-Path $kitsRoot)) {
-            throw "Windows Kits directory not found: $kitsRoot"
+          $regPaths = @(
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows Kits\Installed Roots",
+            "HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots"
+          )
+
+          foreach ($regPath in $regPaths) {
+            if (Test-Path $regPath) {
+              $value = (
+                Get-ItemProperty `
+                  -Path $regPath `
+                  -Name KitsRoot10 `
+                  -ErrorAction SilentlyContinue
+              ).KitsRoot10
+
+              if ($value -and (Test-Path $value)) {
+                $kitsRoot = $value.TrimEnd('\')
+                break
+              }
+            }
+          }
+
+          if (-not $kitsRoot) {
+            $pf86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+
+            $candidates = @(
+              (Join-Path $pf86 "Windows Kits\10"),
+              (Join-Path $env:ProgramFiles "Windows Kits\10")
+            )
+
+            $kitsRoot = $candidates |
+              Where-Object { Test-Path $_ } |
+              Select-Object -First 1
+          }
+
+          if (-not $kitsRoot) {
+            throw "Windows Kits 10 directory not found."
           }
 
           Write-Host ""
           Write-Host "Windows Kits root:"
           Write-Host $kitsRoot
 
-          Write-Host ""
-          Write-Host "Installed SDK/WDK directories:"
+          $binRoot = Join-Path $kitsRoot "bin"
 
-          Get-ChildItem "$kitsRoot\bin" -Directory -ErrorAction SilentlyContinue |
+          if (-not (Test-Path $binRoot)) {
+            throw "Windows Kits bin directory not found: $binRoot"
+          }
+
+          Write-Host ""
+          Write-Host "Installed Windows Kits versions:"
+
+          Get-ChildItem $binRoot -Directory |
             Sort-Object Name |
             Select-Object FullName
+
+          Write-Host ""
+          Write-Host "Searching for WDK 10.0.26100.0 tools..."
+
+          $requiredBin = Join-Path $binRoot "10.0.26100.0"
+
+          if (-not (Test-Path $requiredBin)) {
+            throw "Required Windows Kit 10.0.26100.0 not found: $requiredBin"
+          }
+
+          $signtoolCandidates = @(
+            Get-ChildItem `
+              -Path $requiredBin `
+              -Recurse `
+              -File `
+              -Filter "signtool.exe" `
+              -ErrorAction SilentlyContinue
+          )
+
+          $inf2catCandidates = @(
+            Get-ChildItem `
+              -Path $requiredBin `
+              -Recurse `
+              -File `
+              -Filter "inf2cat.exe" `
+              -ErrorAction SilentlyContinue
+          )
+
+          if ($signtoolCandidates.Count -eq 0) {
+            throw "signtool.exe not found in WDK 10.0.26100.0."
+          }
+
+          if ($inf2catCandidates.Count -eq 0) {
+            throw "inf2cat.exe not found in WDK 10.0.26100.0."
+          }
+
+          $signtool = $signtoolCandidates |
+            Sort-Object FullName |
+            Select-Object -First 1
+
+          $inf2cat = $inf2catCandidates |
+            Sort-Object FullName |
+            Select-Object -First 1
+
+          Write-Host ""
+          Write-Host "Selected SignTool:"
+          Write-Host $signtool.FullName
+
+          Write-Host ""
+          Write-Host "Selected Inf2Cat:"
+          Write-Host $inf2cat.FullName
+
+          if (-not (Test-Path $signtool.FullName)) {
+            throw "Selected signtool.exe does not exist."
+          }
+
+          if (-not (Test-Path $inf2cat.FullName)) {
+            throw "Selected inf2cat.exe does not exist."
+          }
+
+          "KITS_ROOT=$kitsRoot" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+          "INF2CAT=$($inf2cat.FullName)" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+          "SIGNTOOL=$($signtool.FullName)" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+          Write-Host ""
+          Write-Host "WDK PRECHECK OK."
 
       - name: Build driver x64
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host ""
           Write-Host "=============================================="
           Write-Host "BUILD DRIVER X64"
           Write-Host "=============================================="
@@ -74,10 +191,20 @@ jobs:
             throw "Driver build failed."
           }
 
+          if (-not (Test-Path "DiskFilter\x64\Release\diskflt.sys")) {
+            throw "diskflt.sys was not produced."
+          }
+
+          Write-Host "Driver build OK."
+
       - name: Prepare DistDriver
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          Write-Host "=============================================="
+          Write-Host "PREPARE DISTDRIVER"
+          Write-Host "=============================================="
 
           Remove-Item `
             "DistDriver" `
@@ -118,21 +245,31 @@ jobs:
             -Force
 
           Write-Host ""
-          Write-Host "=============================================="
-          Write-Host "DISTDRIVER"
-          Write-Host "=============================================="
+          Write-Host "DistDriver contents:"
 
           Get-ChildItem `
             "DistDriver" `
             -Recurse |
             Select-Object FullName, Length
 
+          foreach ($file in @(
+            "DistDriver\diskflt.inf",
+            "DistDriver\diskflt.cat",
+            "DistDriver\amd64\diskflt.sys",
+            "DistDriver\i386\diskflt.sys"
+          )) {
+            if (-not (Test-Path $file)) {
+              throw "Required DistDriver file missing: $file"
+            }
+          }
+
+          Write-Host "DistDriver OK."
+
       - name: Build management tools
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host ""
           Write-Host "=============================================="
           Write-Host "BUILD MANAGEMENT TOOLS"
           Write-Host "=============================================="
@@ -149,185 +286,55 @@ jobs:
             throw "Management tools build failed."
           }
 
-      - name: Locate WDK signing tools
+          foreach ($file in @(
+            "x64\Release\DiskfltInst.exe",
+            "x64\Release\DiskfltBufmon.exe",
+            "x64\Release\diskfltmgmt.exe"
+          )) {
+            if (-not (Test-Path $file)) {
+              throw "Required tool missing: $file"
+            }
+          }
+
+          Write-Host "Management tools build OK."
+
+      - name: Create test signing certificate
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host ""
-          Write-Host "=============================================="
-          Write-Host "LOCATE SIGNTOOL / INF2CAT"
-          Write-Host "=============================================="
-
-          $searchRoots = @(
-            "$env:ProgramFiles(x86)\Windows Kits\10\bin",
-            "$env:ProgramFiles\Windows Kits\10\bin",
-            "$env:ProgramFiles(x86)\Windows Kits\10\App Certification Kit",
-            "$env:ProgramFiles\Windows Kits\10\App Certification Kit"
-          )
-
-          Write-Host ""
-          Write-Host "Search roots:"
-
-          foreach ($root in $searchRoots) {
-            Write-Host "  $root"
-          }
-
-          $signtoolCandidates = @()
-
-          foreach ($root in $searchRoots) {
-            if (Test-Path $root) {
-              $found = Get-ChildItem `
-                -Path $root `
-                -Recurse `
-                -File `
-                -Filter "signtool.exe" `
-                -ErrorAction SilentlyContinue
-
-              if ($found) {
-                $signtoolCandidates += $found
-              }
-            }
-          }
-
-          $signtoolCandidates = @(
-            $signtoolCandidates |
-              Sort-Object FullName -Unique
-          )
-
-          Write-Host ""
-          Write-Host "Found signtool candidates:"
-
-          foreach ($item in $signtoolCandidates) {
-            Write-Host "  $($item.FullName)"
-          }
-
-          if ($signtoolCandidates.Count -eq 0) {
-            Write-Host ""
-            Write-Host "Attempting PATH lookup..."
-
-            $pathSigntool = Get-Command `
-              signtool.exe `
-              -ErrorAction SilentlyContinue
-
-            if ($pathSigntool) {
-              $signtoolCandidates = @(
-                Get-Item $pathSigntool.Source
-              )
-            }
-          }
-
-          if ($signtoolCandidates.Count -eq 0) {
-            throw "signtool.exe not found after Windows SDK installation."
-          }
-
-          $signtool = $signtoolCandidates |
-            Where-Object {
-              $_.FullName -match "\\x64\\signtool\.exe$"
-            } |
-            Sort-Object FullName -Descending |
-            Select-Object -First 1
-
-          if (-not $signtool) {
-            $signtool = $signtoolCandidates |
-              Sort-Object FullName -Descending |
-              Select-Object -First 1
-          }
-
-          $inf2catCandidates = @()
-
-          foreach ($root in $searchRoots) {
-            if (Test-Path $root) {
-              $found = Get-ChildItem `
-                -Path $root `
-                -Recurse `
-                -File `
-                -Filter "inf2cat.exe" `
-                -ErrorAction SilentlyContinue
-
-              if ($found) {
-                $inf2catCandidates += $found
-              }
-            }
-          }
-
-          $inf2catCandidates = @(
-            $inf2catCandidates |
-              Sort-Object FullName -Unique
-          )
-
-          Write-Host ""
-          Write-Host "Found inf2cat candidates:"
-
-          foreach ($item in $inf2catCandidates) {
-            Write-Host "  $($item.FullName)"
-          }
-
-          if ($inf2catCandidates.Count -eq 0) {
-            throw "inf2cat.exe not found."
-          }
-
-          $inf2cat = $inf2catCandidates |
-            Sort-Object FullName -Descending |
-            Select-Object -First 1
-
-          Write-Host ""
-          Write-Host "Selected SignTool:"
-          Write-Host $signtool.FullName
-
-          Write-Host ""
-          Write-Host "Selected Inf2Cat:"
-          Write-Host $inf2cat.FullName
-
-          "SIGNTOOL=$($signtool.FullName)" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Append `
-              -Encoding utf8
-
-          "INF2CAT=$($inf2cat.FullName)" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Append `
-              -Encoding utf8
-
-      - name: Prepare signing certificate
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          Write-Host ""
           Write-Host "=============================================="
           Write-Host "CREATE TEST CERTIFICATE"
           Write-Host "=============================================="
 
-          $certDir = Join-Path `
+          $signingDir = Join-Path `
             $env:GITHUB_WORKSPACE `
             "Signing"
 
           New-Item `
             -ItemType Directory `
             -Force `
-            -Path $certDir |
+            -Path $signingDir |
             Out-Null
 
           $pfxPath = Join-Path `
-            $certDir `
+            $signingDir `
             "AodFreeze-Test.pfx"
 
           $cerPath = Join-Path `
-            $certDir `
+            $signingDir `
             "AodFreeze-Test.cer"
 
-          $pfxPasswordText = "AodFreeze-Test-2026!"
+          $passwordText = "AodFreeze-Test-2026!"
 
-          $pfxPassword = ConvertTo-SecureString `
-            $pfxPasswordText `
+          $password = ConvertTo-SecureString `
+            $passwordText `
             -AsPlainText `
             -Force
 
           Get-ChildItem `
-            "Cert:\CurrentUser\My" |
+            "Cert:\CurrentUser\My" `
+            -ErrorAction SilentlyContinue |
             Where-Object {
               $_.Subject -eq "CN=AodFreeze Test Certificate"
             } |
@@ -346,14 +353,20 @@ jobs:
             -NotAfter (Get-Date).AddYears(13)
 
           if (-not $cert) {
-            throw "Could not create test certificate."
+            throw "Test certificate creation failed."
           }
 
           Write-Host ""
-          Write-Host "Certificate:"
-          Write-Host "Subject    : $($cert.Subject)"
-          Write-Host "Thumbprint : $($cert.Thumbprint)"
-          Write-Host "Expires    : $($cert.NotAfter)"
+          Write-Host "Certificate subject:"
+          Write-Host $cert.Subject
+
+          Write-Host ""
+          Write-Host "Certificate thumbprint:"
+          Write-Host $cert.Thumbprint
+
+          Write-Host ""
+          Write-Host "Certificate expiration:"
+          Write-Host $cert.NotAfter
 
           Export-Certificate `
             -Cert $cert `
@@ -364,7 +377,7 @@ jobs:
           Export-PfxCertificate `
             -Cert $cert `
             -FilePath $pfxPath `
-            -Password $pfxPassword `
+            -Password $password `
             -Force |
             Out-Null
 
@@ -388,16 +401,30 @@ jobs:
               -Append `
               -Encoding utf8
 
-          "PFX_PASSWORD=$pfxPasswordText" |
+          "PFX_PASSWORD=$passwordText" |
             Out-File `
               -FilePath $env:GITHUB_ENV `
               -Append `
               -Encoding utf8
 
+          Write-Host "Test certificate created."
+
       - name: Sign driver SYS
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          Write-Host "=============================================="
+          Write-Host "SIGN DRIVER SYS"
+          Write-Host "=============================================="
+
+          if (-not (Test-Path "$env:SIGNTOOL")) {
+            throw "SignTool not found: $env:SIGNTOOL"
+          }
+
+          if (-not (Test-Path "$env:PFX_PATH")) {
+            throw "PFX not found: $env:PFX_PATH"
+          }
 
           $sysFiles = @(
             "DistDriver\amd64\diskflt.sys",
@@ -406,12 +433,16 @@ jobs:
 
           foreach ($sys in $sysFiles) {
 
-            Write-Host ""
-            Write-Host "=============================================="
-            Write-Host "SIGN $sys"
-            Write-Host "=============================================="
+            if (-not (Test-Path $sys)) {
+              throw "SYS file not found: $sys"
+            }
 
-            & "$env:SIGNTOOL" sign `
+            Write-Host ""
+            Write-Host "Signing:"
+            Write-Host $sys
+
+            & "$env:SIGNTOOL" `
+              sign `
               /v `
               /fd SHA256 `
               /f "$env:PFX_PATH" `
@@ -425,15 +456,18 @@ jobs:
             Write-Host "SIGN OK: $sys"
           }
 
-      - name: Trust test certificate on build runner
+      - name: Trust test certificate on runner
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host ""
           Write-Host "=============================================="
           Write-Host "TRUST TEST CERTIFICATE"
           Write-Host "=============================================="
+
+          if (-not (Test-Path "$env:CER_PATH")) {
+            throw "Certificate file not found: $env:CER_PATH"
+          }
 
           Import-Certificate `
             -FilePath "$env:CER_PATH" `
@@ -445,12 +479,17 @@ jobs:
             -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" |
             Out-Null
 
-          Write-Host "Certificate imported into trusted stores."
+          Write-Host "Certificate imported into Trusted Root."
+          Write-Host "Certificate imported into Trusted Publishers."
 
       - name: Verify embedded SYS signatures
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          Write-Host "=============================================="
+          Write-Host "VERIFY SYS SIGNATURES"
+          Write-Host "=============================================="
 
           $sysFiles = @(
             "DistDriver\amd64\diskflt.sys",
@@ -460,20 +499,34 @@ jobs:
           foreach ($sys in $sysFiles) {
 
             Write-Host ""
-            Write-Host "=============================================="
-            Write-Host "VERIFY $sys"
-            Write-Host "=============================================="
+            Write-Host "VERIFY:"
+            Write-Host $sys
 
-            & "$env:SIGNTOOL" verify `
+            & "$env:SIGNTOOL" `
+              verify `
               /v `
               /pa `
               "$sys"
 
-            if ($LASTEXITCODE -ne 0) {
-              throw "Signature verification failed for $sys"
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "SIGNTOOL /pa VERIFY OK."
             }
+            else {
+              Write-Host ""
+              Write-Host "Standard /pa verification did not accept the test certificate."
+              Write-Host "Checking embedded Authenticode signature..."
 
-            Write-Host "VERIFY OK: $sys"
+              $signature = Get-AuthenticodeSignature `
+                -FilePath $sys
+
+              Write-Host "Authenticode status: $($signature.Status)"
+
+              if ($signature.Status -ne "Valid") {
+                throw "Embedded signature is not valid for $sys. Status=$($signature.Status)"
+              }
+
+              Write-Host "Embedded signature is VALID."
+            }
           }
 
       - name: Generate catalog for Windows 11 25H2
@@ -481,13 +534,17 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          $driverDir = (Resolve-Path "DistDriver").Path
-
-          Write-Host ""
           Write-Host "=============================================="
           Write-Host "INF2CAT WINDOWS 11 25H2 X64"
           Write-Host "=============================================="
 
+          $driverDir = (Resolve-Path "DistDriver").Path
+
+          Write-Host ""
+          Write-Host "Inf2Cat:"
+          Write-Host $env:INF2CAT
+
+          Write-Host ""
           Write-Host "Driver directory:"
           Write-Host $driverDir
 
@@ -508,12 +565,11 @@ jobs:
             Get-ChildItem `
               "DistDriver" `
               -Filter "*.cat" `
-              -File `
-              -ErrorAction SilentlyContinue
+              -File
           )
 
           if ($catFiles.Count -eq 0) {
-            throw "Inf2Cat completed but no CAT file was generated."
+            throw "Inf2Cat succeeded but no CAT file was generated."
           }
 
           Write-Host ""
@@ -522,10 +578,16 @@ jobs:
           $catFiles |
             Select-Object FullName, Length
 
+          Write-Host "Inf2Cat OK."
+
       - name: Sign catalog
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          Write-Host "=============================================="
+          Write-Host "SIGN CATALOG"
+          Write-Host "=============================================="
 
           $catFiles = @(
             Get-ChildItem `
@@ -541,12 +603,11 @@ jobs:
           foreach ($cat in $catFiles) {
 
             Write-Host ""
-            Write-Host "=============================================="
-            Write-Host "SIGN CATALOG"
+            Write-Host "Signing catalog:"
             Write-Host $cat.FullName
-            Write-Host "=============================================="
 
-            & "$env:SIGNTOOL" sign `
+            & "$env:SIGNTOOL" `
+              sign `
               /v `
               /fd SHA256 `
               /f "$env:PFX_PATH" `
@@ -554,7 +615,7 @@ jobs:
               "$($cat.FullName)"
 
             if ($LASTEXITCODE -ne 0) {
-              throw "Catalog signing failed."
+              throw "Catalog signing failed for $($cat.FullName)"
             }
 
             Write-Host "CATALOG SIGN OK."
@@ -564,6 +625,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          Write-Host "=============================================="
+          Write-Host "VERIFY CATALOG"
+          Write-Host "=============================================="
 
           $catFiles = @(
             Get-ChildItem `
@@ -575,27 +640,40 @@ jobs:
           foreach ($cat in $catFiles) {
 
             Write-Host ""
-            Write-Host "=============================================="
-            Write-Host "VERIFY CATALOG"
+            Write-Host "VERIFY:"
             Write-Host $cat.FullName
-            Write-Host "=============================================="
 
-            & "$env:SIGNTOOL" verify `
+            & "$env:SIGNTOOL" `
+              verify `
               /v `
               /pa `
               "$($cat.FullName)"
 
-            if ($LASTEXITCODE -ne 0) {
-              throw "Catalog verification failed."
+            if ($LASTEXITCODE -eq 0) {
+              Write-Host "CATALOG /pa VERIFY OK."
             }
+            else {
+              $signature = Get-AuthenticodeSignature `
+                -FilePath $cat.FullName
 
-            Write-Host "CATALOG VERIFY OK."
+              Write-Host "Authenticode status: $($signature.Status)"
+
+              if ($signature.Status -ne "Valid") {
+                throw "Catalog signature is not valid: $($cat.FullName)"
+              }
+
+              Write-Host "Embedded catalog signature is VALID."
+            }
           }
 
       - name: Prepare AodFreeze package
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+
+          Write-Host "=============================================="
+          Write-Host "PREPARE AODFREEZE PACKAGE"
+          Write-Host "=============================================="
 
           $package = "AodFreeze-package"
 
@@ -668,54 +746,52 @@ jobs:
             "$package\AodFreeze-Test.cer" `
             -Force
 
-          $readme = @(
-            "AodFreeze"
-            "========="
-            ""
-            "TEST BUILD"
-            ""
-            "Driver:"
-            "  Driver\diskflt.inf"
-            "  Driver\diskflt.cat"
-            "  Driver\amd64\diskflt.sys"
-            "  Driver\i386\diskflt.sys"
-            ""
-            "Tools:"
-            "  Tools\DiskfltInst.exe"
-            "  Tools\DiskfltBufmon.exe"
-            "  Tools\diskfltmgmt.exe"
-            "  Tools\cabarc.exe"
-            ""
-            "Test certificate:"
-            "  AodFreeze-Test.cer"
-            ""
-            "Target:"
-            "  Windows 11 25H2 x64"
-            ""
-            "Inf2Cat:"
-            "  /os:10_25H2_X64"
-            ""
-            "Signing:"
-            "  SHA256"
-            "  Self-signed TEST certificate"
-            ""
-            "IMPORTANT:"
-            "This package contains a TEST-SIGNED kernel driver."
-            ""
-            "For testing:"
-            "1. Enable Windows test signing."
-            "2. Install AodFreeze-Test.cer into:"
-            "   Local Machine\Trusted Root Certification Authorities"
-            "3. Install AodFreeze-Test.cer into:"
-            "   Local Machine\Trusted Publishers"
-            "4. Install the driver package."
-            ""
-            "This is NOT a production/Microsoft-signed driver package."
-            ""
-            "This package was built by GitHub Actions."
-          )
+          @"
+          AodFreeze
+          =========
 
-          $readme |
+          TEST BUILD
+
+          Driver:
+            Driver\diskflt.inf
+            Driver\diskflt.cat
+            Driver\amd64\diskflt.sys
+            Driver\i386\diskflt.sys
+
+          Tools:
+            Tools\DiskfltInst.exe
+            Tools\DiskfltBufmon.exe
+            Tools\diskfltmgmt.exe
+            Tools\cabarc.exe
+
+          Test certificate:
+            AodFreeze-Test.cer
+
+          Target:
+            Windows 11 25H2 x64
+
+          Inf2Cat:
+            /os:10_25H2_X64
+
+          Signing:
+            SHA256
+            Self-signed TEST certificate
+
+          IMPORTANT:
+            This package contains a TEST-SIGNED kernel driver.
+
+            Before testing:
+            1. Enable Windows Test Mode.
+            2. Install AodFreeze-Test.cer into:
+               Local Machine\Trusted Root Certification Authorities
+            3. Install AodFreeze-Test.cer into:
+               Local Machine\Trusted Publishers
+            4. Install the driver package.
+
+          This is NOT a production/Microsoft-signed driver package.
+
+          This package was built by GitHub Actions.
+          "@ |
             Set-Content `
               "$package\README.txt" `
               -Encoding UTF8
@@ -725,63 +801,66 @@ jobs:
             -DestinationPath "AodFreeze-package.zip" `
             -Force
 
+          if (-not (Test-Path "AodFreeze-package.zip")) {
+            throw "AodFreeze-package.zip was not created."
+          }
+
           Write-Host ""
-          Write-Host "=============================================="
-          Write-Host "FINAL PACKAGE"
-          Write-Host "=============================================="
+          Write-Host "Package contents:"
 
           Get-ChildItem `
             $package `
             -Recurse |
             Select-Object FullName, Length
 
-          Write-Host ""
-          Write-Host "ZIP:"
-
-          Get-Item `
-            "AodFreeze-package.zip" |
-            Select-Object FullName, Length
-
-      - name: Show signatures and hashes
+      - name: Final integrity and hashes
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host ""
           Write-Host "=============================================="
-          Write-Host "FINAL SIGNATURES AND SHA256"
+          Write-Host "FINAL INTEGRITY CHECK"
           Write-Host "=============================================="
 
           $files = @(
+            "DistDriver\diskflt.inf",
+            "DistDriver\diskflt.cat",
             "DistDriver\amd64\diskflt.sys",
             "DistDriver\i386\diskflt.sys",
-            "DistDriver\diskflt.cat"
+            "x64\Release\DiskfltInst.exe",
+            "x64\Release\DiskfltBufmon.exe",
+            "x64\Release\diskfltmgmt.exe",
+            "AodFreeze-package.zip"
           )
 
           foreach ($file in $files) {
+            if (-not (Test-Path $file)) {
+              throw "Required final file missing: $file"
+            }
+          }
 
-            Write-Host ""
-            Write-Host "=============================================="
-            Write-Host $file
-            Write-Host "=============================================="
+          Write-Host ""
+          Write-Host "SHA256:"
+          Write-Host ""
 
+          foreach ($file in @(
+            "DistDriver\amd64\diskflt.sys",
+            "DistDriver\i386\diskflt.sys",
+            "DistDriver\diskflt.cat",
+            "AodFreeze-package.zip"
+          )) {
             Get-FileHash `
               $file `
               -Algorithm SHA256
-
-            Get-AuthenticodeSignature `
-              $file |
-              Format-List `
-                Status,
-                StatusMessage,
-                Path,
-                SignerCertificate
           }
 
-      - name: Upload AodFreeze signed test package
+          Write-Host ""
+          Write-Host "FINAL CHECK OK."
+
+      - name: Upload AodFreeze package
         uses: actions/upload-artifact@v4
         with:
-          name: AodFreeze-signed-test-package
+          name: AodFreeze-package
           path: AodFreeze-package.zip
           if-no-files-found: error
           retention-days: 30
