@@ -79,7 +79,8 @@ jobs:
               )
             }
 
-            $config | ConvertTo-Json -Depth 5 |
+            $config |
+              ConvertTo-Json -Depth 5 |
               Set-Content -Path $configPath -Encoding UTF8
 
             Write-Host "=== VS CONFIG ==="
@@ -148,7 +149,7 @@ jobs:
           }
 
           $afxwin = Get-ChildItem `
-            "$vsPath\VC\Tools\MSVC\14.16*\atlmfc\include\afxwin.h" `
+            "$vsPath\VC\Tools\MSVC\14.16\*\atlmfc\include\afxwin.h" `
             -File `
             -ErrorAction SilentlyContinue |
             Select-Object -First 1
@@ -238,39 +239,10 @@ jobs:
           Copy-Item $inf $dist -Force
           Copy-Item $cat $dist -Force
 
-          # Required by legacy resource projects during solution build.
-          # These are build-time copies only.
-          # The final package uses root diskflt.sys.
-          Copy-Item $sys "$dist\amd64\diskflt.sys" -Force
-          Copy-Item $sys "$dist\i386\diskflt.sys" -Force
-
-          Write-Host "=== DISTDRIVER CONTENT ==="
+          Write-Host "=== INITIAL DISTDRIVER CONTENT ==="
 
           Get-ChildItem $dist -Recurse -File |
             Select-Object FullName, Length
-
-      - name: Build solution
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $solution = Join-Path $PWD "DiskFilter.sln"
-
-          if (-not (Test-Path $solution)) {
-            throw "Solution not found: $solution"
-          }
-
-          & msbuild $solution `
-            /m `
-            /p:Configuration=Release `
-            /p:Platform=x64 `
-            /p:EnableInfVerif=false `
-            /p:InfVerifEnabled=false `
-            /p:SkipPackageVerification=true
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Solution build failed with exit code $LASTEXITCODE"
-          }
 
       - name: Locate SignTool
         shell: pwsh
@@ -357,7 +329,7 @@ jobs:
             -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" |
             Out-Null
 
-      - name: Sign driver SYS
+      - name: Sign driver SYS before solution build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -380,6 +352,120 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "SignTool failed to sign $path with exit code $LASTEXITCODE"
           }
+
+          $sig = Get-AuthenticodeSignature $path
+
+          Write-Host "Signed SYS status: $($sig.Status)"
+          Write-Host "Signed SYS signer: $($sig.SignerCertificate.Subject)"
+
+          if ($sig.Status -ne "Valid") {
+            throw "PowerShell signature verification failed for ${path}: $($sig.Status)"
+          }
+
+      - name: Prepare signed SYS copies for legacy resource projects
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $source = Join-Path $PWD "DistDriver\diskflt.sys"
+
+          if (-not (Test-Path $source)) {
+            throw "Signed SYS not found: $source"
+          }
+
+          $sig = Get-AuthenticodeSignature $source
+
+          if ($sig.Status -ne "Valid") {
+            throw "Signed SYS is not valid before resource build: $($sig.Status)"
+          }
+
+          Copy-Item `
+            $source `
+            "DistDriver\amd64\diskflt.sys" `
+            -Force
+
+          Copy-Item `
+            $source `
+            "DistDriver\i386\diskflt.sys" `
+            -Force
+
+          Write-Host "=== SIGNED RESOURCE SYS COPIES ==="
+
+          Get-FileHash `
+            "DistDriver\diskflt.sys" `
+            -Algorithm SHA256
+
+          Get-FileHash `
+            "DistDriver\amd64\diskflt.sys" `
+            -Algorithm SHA256
+
+          Get-FileHash `
+            "DistDriver\i386\diskflt.sys" `
+            -Algorithm SHA256
+
+          Write-Host "=== SIGNATURE STATUS ==="
+
+          Get-AuthenticodeSignature `
+            "DistDriver\amd64\diskflt.sys" |
+            Format-List Status, SignerCertificate
+
+          Get-AuthenticodeSignature `
+            "DistDriver\i386\diskflt.sys" |
+            Format-List Status, SignerCertificate
+
+      - name: Build solution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $solution = Join-Path $PWD "DiskFilter.sln"
+
+          if (-not (Test-Path $solution)) {
+            throw "Solution not found: $solution"
+          }
+
+          & msbuild $solution `
+            /m `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:EnableInfVerif=false `
+            /p:InfVerifEnabled=false `
+            /p:SkipPackageVerification=true
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Solution build failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Verify installer embedded SYS signature
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $candidates = @(
+            "x64\Release\DiskfltInst.exe",
+            "DiskfltInst\x64\Release\DiskfltInst.exe"
+          )
+
+          $installer = $null
+
+          foreach ($candidate in $candidates) {
+            if (Test-Path $candidate) {
+              $installer = (Resolve-Path $candidate).Path
+              break
+            }
+          }
+
+          if (-not $installer) {
+            throw "DiskfltInst.exe was not found after solution build."
+          }
+
+          Write-Host "Installer: $installer"
+
+          $installerHash = Get-FileHash $installer -Algorithm SHA256
+
+          Write-Host "Installer SHA256: $($installerHash.Hash)"
+
+          Write-Host "The installer was built after the signed SYS was placed in DistDriver."
 
       - name: Verify embedded SYS test signature
         shell: pwsh
@@ -517,6 +603,15 @@ jobs:
             throw "Embedded SYS signature verification failed for ${sys}"
           }
 
+          $sig = Get-AuthenticodeSignature $sys
+
+          if ($sig.Status -ne "Valid") {
+            throw "Final PowerShell SYS signature verification failed for ${sys}: $($sig.Status)"
+          }
+
+          Write-Host "=== FINAL DRIVER SIGNATURE STATUS ==="
+          $sig | Format-List Status,SignerCertificate
+
       - name: Prepare final package
         shell: pwsh
         run: |
@@ -538,6 +633,7 @@ jobs:
 
           # Final package layout matches the build-generated INF:
           # diskflt.sys is at Driver root.
+
           Copy-Item `
             "DistDriver\diskflt.inf" `
             "$driverDir\diskflt.inf" `
@@ -625,16 +721,33 @@ jobs:
             Write-Host "OK: $file"
           }
 
+          $sys = "$package\Driver\diskflt.sys"
+          $cat = "$package\Driver\diskflt.cat"
+          $inf = "$package\Driver\diskflt.inf"
+
+          Write-Host "=== PACKAGE SYS SIGNATURE ==="
+
+          $sig = Get-AuthenticodeSignature $sys
+
+          $sig |
+            Format-List Status,SignerCertificate
+
+          if ($sig.Status -ne "Valid") {
+            throw "Final package SYS is not Authenticode-valid: $($sig.Status)"
+          }
+
+          Write-Host "=== PACKAGE HASHES ==="
+
           Get-FileHash `
-            "$package\Driver\diskflt.sys" `
+            $sys `
             -Algorithm SHA256
 
           Get-FileHash `
-            "$package\Driver\diskflt.cat" `
+            $cat `
             -Algorithm SHA256
 
           Get-FileHash `
-            "$package\Driver\diskflt.inf" `
+            $inf `
             -Algorithm SHA256
 
       - name: Create ZIP
