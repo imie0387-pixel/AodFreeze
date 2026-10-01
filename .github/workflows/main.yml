@@ -91,18 +91,28 @@ jobs:
             throw "Driver build output missing: DiskFilter\x64\Release\diskflt.sys"
           }
 
+          if (-not (Test-Path "DiskFilter\x64\Release\DiskFilter\diskflt.inf")) {
+            throw "Stamped driver INF missing: DiskFilter\x64\Release\DiskFilter\diskflt.inf"
+          }
+
           if (-not (Test-Path "DiskFilter\x64\Release\DiskFilter\diskflt.cat")) {
             throw "Driver build catalog missing: DiskFilter\x64\Release\DiskFilter\diskflt.cat"
           }
 
-      - name: Prepare DistDriver
+          Write-Host "Driver build completed successfully."
+
+      - name: Prepare DistDriver for legacy resource compilation
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
           Remove-Item DistDriver -Recurse -Force -ErrorAction SilentlyContinue
 
-          New-Item -ItemType Directory -Force -Path DistDriver | Out-Null
+          New-Item -ItemType Directory -Force -Path "DistDriver" | Out-Null
+          New-Item -ItemType Directory -Force -Path "DistDriver\amd64" | Out-Null
+          New-Item -ItemType Directory -Force -Path "DistDriver\i386" | Out-Null
+
+          Write-Host "=== COPYING DRIVER PACKAGE ==="
 
           Copy-Item `
             "DiskFilter\x64\Release\diskflt.sys" `
@@ -119,10 +129,31 @@ jobs:
             "DistDriver\diskflt.cat" `
             -Force
 
+          Write-Host "=== CREATING LEGACY RESOURCE INPUTS ==="
+
+          # The old management projects explicitly reference:
+          #   ..\DistDriver\amd64\diskflt.sys
+          #   ..\DistDriver\i386\diskflt.sys
+          #
+          # These copies are used only as build-time resources.
+          # The final x64 driver package uses DistDriver\diskflt.sys.
+
+          Copy-Item `
+            "DiskFilter\x64\Release\diskflt.sys" `
+            "DistDriver\amd64\diskflt.sys" `
+            -Force
+
+          Copy-Item `
+            "DiskFilter\x64\Release\diskflt.sys" `
+            "DistDriver\i386\diskflt.sys" `
+            -Force
+
           $required = @(
             "DistDriver\diskflt.inf",
             "DistDriver\diskflt.cat",
-            "DistDriver\diskflt.sys"
+            "DistDriver\diskflt.sys",
+            "DistDriver\amd64\diskflt.sys",
+            "DistDriver\i386\diskflt.sys"
           )
 
           foreach ($path in $required) {
@@ -165,6 +196,8 @@ jobs:
             Write-Host "OK: $path"
           }
 
+          Write-Host "Management tools build completed successfully."
+
       - name: Locate SignTool
         shell: pwsh
         run: |
@@ -172,11 +205,7 @@ jobs:
 
           $root = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
 
-          $candidates = Get-ChildItem `
-            $root `
-            -Recurse `
-            -Filter signtool.exe `
-            -File |
+          $candidates = Get-ChildItem $root -Recurse -Filter signtool.exe -File |
             Sort-Object FullName -Descending
 
           if (-not $candidates) {
@@ -232,8 +261,7 @@ jobs:
           Export-Certificate `
             -Cert $cert `
             -FilePath "AodFreeze-Test.cer" `
-            -Type CERT |
-            Out-Null
+            -Type CERT | Out-Null
 
           if (-not (Test-Path "AodFreeze-Test.cer")) {
             throw "Certificate export failed."
@@ -243,37 +271,6 @@ jobs:
           Write-Host "Certificate thumbprint: $($cert.Thumbprint)"
           Write-Host "Certificate expiration: $($cert.NotAfter)"
 
-      - name: Sign driver SYS
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $sysFiles = @(
-            "DistDriver\diskflt.sys"
-          )
-
-          foreach ($path in $sysFiles) {
-            if (-not (Test-Path $path)) {
-              throw "Missing SYS before signing: $path"
-            }
-
-            Write-Host "Signing: $path"
-
-            & $env:SIGNTOOL sign `
-              /v `
-              /fd sha256 `
-              /sm `
-              /s My `
-              /sha1 $env:CERT_THUMBPRINT `
-              $path
-
-            if ($LASTEXITCODE -ne 0) {
-              throw "SignTool failed for $path with exit code $LASTEXITCODE"
-            }
-
-            Write-Host "SIGN OK: $path"
-          }
-
       - name: Trust test certificate on runner
         shell: pwsh
         run: |
@@ -281,62 +278,26 @@ jobs:
 
           Import-Certificate `
             -FilePath "AodFreeze-Test.cer" `
-            -CertStoreLocation "Cert:\LocalMachine\Root" |
-            Out-Null
+            -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
 
           Import-Certificate `
             -FilePath "AodFreeze-Test.cer" `
-            -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" |
-            Out-Null
+            -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" | Out-Null
 
           Write-Host "Test certificate imported into Root and TrustedPublisher."
 
-      - name: Verify driver signature
+      - name: Sign driver SYS file
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
           $path = "DistDriver\diskflt.sys"
 
-          Write-Host "Verifying: $path"
-
-          & $env:SIGNTOOL verify /v /kp $path
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Kernel-mode signature verification failed for $path"
+          if (-not (Test-Path $path)) {
+            throw "Missing SYS before signing: $path"
           }
 
-          $signature = Get-AuthenticodeSignature $path
-
-          if ($signature.Status -ne "Valid") {
-            throw "PowerShell signature verification failed for $path: $($signature.Status)"
-          }
-
-          Write-Host "DRIVER SIGNATURE OK."
-
-      - name: Verify build-generated catalog
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $catalog = "DistDriver\diskflt.cat"
-
-          if (-not (Test-Path $catalog)) {
-            throw "Catalog missing: $catalog"
-          }
-
-          Write-Host "Catalog:"
-
-          Get-Item $catalog |
-            Select-Object FullName, Length
-
-          Write-Host "The catalog generated by the driver build will be signed."
-          Write-Host "No second manual Inf2Cat invocation is performed."
-
-      - name: Sign catalog
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
+          Write-Host "Signing: $path"
 
           & $env:SIGNTOOL sign `
             /v `
@@ -344,7 +305,106 @@ jobs:
             /sm `
             /s My `
             /sha1 $env:CERT_THUMBPRINT `
-            "DistDriver\diskflt.cat"
+            $path
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "SignTool failed for $path with exit code $LASTEXITCODE"
+          }
+
+          Write-Host "SYS SIGN OK."
+
+      - name: Verify embedded SYS signature
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $path = "DistDriver\diskflt.sys"
+
+          Write-Host "=== SIGNTOOL KERNEL VERIFICATION ==="
+
+          & $env:SIGNTOOL verify /v /kp $path
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Kernel-mode signature verification failed for $path"
+          }
+
+          Write-Host "=== POWERSHELL SIGNATURE VERIFICATION ==="
+
+          $signature = Get-AuthenticodeSignature $path
+
+          $signature |
+            Select-Object Status, StatusMessage, Path, SignerCertificate
+
+          if ($signature.Status -ne "Valid") {
+            throw "PowerShell signature verification failed for $path: $($signature.Status)"
+          }
+
+          Write-Host "Embedded SYS signature is valid."
+
+      - name: Regenerate catalog after SYS signing
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $inf2cat = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.26100.0\x86\inf2cat.exe"
+
+          $drvcat = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.26100.0\x86\drvcat.exe"
+
+          if (-not (Test-Path $inf2cat)) {
+            throw "Inf2Cat not found: $inf2cat"
+          }
+
+          if (-not (Test-Path $drvcat)) {
+            throw "DrvCat not found: $drvcat"
+          }
+
+          Remove-Item "DistDriver\diskflt.cat" -Force -ErrorAction SilentlyContinue
+
+          Write-Host "=== INF2CAT ==="
+
+          & $inf2cat `
+            /driver:"$PWD\DistDriver" `
+            /os:10_25H2_X64
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inf2Cat failed with exit code $LASTEXITCODE"
+          }
+
+          if (-not (Test-Path "DistDriver\diskflt.cat")) {
+            throw "Inf2Cat did not generate DistDriver\diskflt.cat"
+          }
+
+          Write-Host "=== DRVCAT ==="
+
+          & $drvcat `
+            "$PWD\DistDriver\diskflt.cat" `
+            /set WdkVersion 10.0.26100.0 `
+            /set WdkAssemblyVersion 10.0.26100.4202
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "DrvCat failed with exit code $LASTEXITCODE"
+          }
+
+          Write-Host "Catalog regenerated from the SIGNED SYS file."
+
+      - name: Sign catalog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $catalog = "DistDriver\diskflt.cat"
+
+          if (-not (Test-Path $catalog)) {
+            throw "Catalog missing before signing: $catalog"
+          }
+
+          & $env:SIGNTOOL sign `
+            /v `
+            /fd sha256 `
+            /sm `
+            /s My `
+            /sha1 $env:CERT_THUMBPRINT `
+            $catalog
 
           if ($LASTEXITCODE -ne 0) {
             throw "Catalog signing failed with exit code $LASTEXITCODE"
@@ -357,24 +417,21 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
+          $catalog = "DistDriver\diskflt.cat"
+          $inf = "DistDriver\diskflt.inf"
+          $sys = "DistDriver\diskflt.sys"
+
           Write-Host "=== VERIFY CATALOG SIGNATURE ==="
 
-          & $env:SIGNTOOL verify `
-            /v `
-            /kp `
-            "DistDriver\diskflt.cat"
+          & $env:SIGNTOOL verify /v /pa $catalog
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Catalog kernel-policy signature verification failed."
+            throw "Catalog signature verification failed."
           }
 
           Write-Host "=== VERIFY INF AGAINST CATALOG ==="
 
-          & $env:SIGNTOOL verify `
-            /v `
-            /kp `
-            /c "DistDriver\diskflt.cat" `
-            "DistDriver\diskflt.inf"
+          & $env:SIGNTOOL verify /v /pa /c $catalog $inf
 
           if ($LASTEXITCODE -ne 0) {
             throw "INF/catalog verification failed."
@@ -382,17 +439,21 @@ jobs:
 
           Write-Host "=== VERIFY SYS AGAINST CATALOG ==="
 
-          & $env:SIGNTOOL verify `
-            /v `
-            /kp `
-            /c "DistDriver\diskflt.cat" `
-            "DistDriver\diskflt.sys"
+          & $env:SIGNTOOL verify /v /pa /c $catalog $sys
 
           if ($LASTEXITCODE -ne 0) {
             throw "SYS/catalog verification failed."
           }
 
-          Write-Host "CAT + INF + SYS RELATIONSHIP OK."
+          Write-Host "=== VERIFY EMBEDDED SYS SIGNATURE ==="
+
+          & $env:SIGNTOOL verify /v /kp $sys
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Embedded SYS kernel signature verification failed."
+          }
+
+          Write-Host "All driver signature and catalog checks passed."
 
       - name: Prepare AodFreeze package
         shell: pwsh
@@ -401,16 +462,8 @@ jobs:
 
           $package = "AodFreeze-package"
 
-          Remove-Item `
-            $package `
-            -Recurse `
-            -Force `
-            -ErrorAction SilentlyContinue
-
-          Remove-Item `
-            "AodFreeze-package.zip" `
-            -Force `
-            -ErrorAction SilentlyContinue
+          Remove-Item $package -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item "AodFreeze-package.zip" -Force -ErrorAction SilentlyContinue
 
           New-Item `
             -ItemType Directory `
@@ -495,23 +548,25 @@ jobs:
 
             On the Windows 11 test machine:
 
-              1. Import AodFreeze-Test.cer into
-                 Local Computer Trusted Root Certification Authorities.
+              1. Import AodFreeze-Test.cer into:
+                 Local Computer ->
+                 Trusted Root Certification Authorities.
 
-              2. Import AodFreeze-Test.cer into
-                 Local Computer Trusted Publishers.
+              2. Import AodFreeze-Test.cer into:
+                 Local Computer ->
+                 Trusted Publishers.
 
               3. Disable Secure Boot.
 
-              4. Enable Windows test signing with:
-
+              4. Enable Windows test signing as Administrator:
                  bcdedit /set testsigning on
 
               5. Reboot before installing/testing the driver.
 
-          The certificate private key is not included in this package.
+          The certificate private key is NOT included in this package.
 
-          This package contains the x64 driver build only.
+          The amd64 and i386 driver copies used during compilation
+          are build-time resources only and are not included here.
           "@ |
             Set-Content "$package\README.txt" -Encoding UTF8
 
@@ -535,7 +590,7 @@ jobs:
             Write-Host "PACKAGE OK: $path"
           }
 
-          Write-Host "=== PACKAGE CONTENTS ==="
+          Write-Host "=== FINAL PACKAGE CONTENTS ==="
 
           Get-ChildItem $package -Recurse |
             Select-Object FullName, Length
@@ -544,6 +599,10 @@ jobs:
             -Path "$package\*" `
             -DestinationPath "AodFreeze-package.zip" `
             -Force
+
+          if (-not (Test-Path "AodFreeze-package.zip")) {
+            throw "ZIP creation failed."
+          }
 
           Write-Host "=== ZIP ==="
 
@@ -572,43 +631,33 @@ jobs:
 
             Write-Host "=== SHA256 ==="
 
-            Get-FileHash `
-              $path `
-              -Algorithm SHA256 |
+            Get-FileHash $path -Algorithm SHA256 |
               Select-Object Algorithm, Hash, Path
           }
 
           Write-Host "=== FINAL DRIVER SIGNATURE STATUS ==="
 
-          $signature = Get-AuthenticodeSignature `
-            "DistDriver\diskflt.sys"
+          $driverSignature = Get-AuthenticodeSignature "DistDriver\diskflt.sys"
 
-          $signature |
-            Select-Object `
-              Status,
-              StatusMessage,
-              Path,
-              SignerCertificate
+          $driverSignature |
+            Select-Object Status, StatusMessage, Path, SignerCertificate
 
-          if ($signature.Status -ne "Valid") {
-            throw "Final driver signature is not valid."
+          if ($driverSignature.Status -ne "Valid") {
+            throw "Final driver signature is not Valid."
           }
 
           Write-Host "=== FINAL CATALOG SIGNATURE STATUS ==="
 
-          $catSignature = Get-AuthenticodeSignature `
-            "DistDriver\diskflt.cat"
+          $catSignature = Get-AuthenticodeSignature "DistDriver\diskflt.cat"
 
           $catSignature |
-            Select-Object `
-              Status,
-              StatusMessage,
-              Path,
-              SignerCertificate
+            Select-Object Status, StatusMessage, Path, SignerCertificate
 
           if ($catSignature.Status -ne "Valid") {
-            throw "Final catalog signature is not valid."
+            throw "Final catalog signature is not Valid."
           }
+
+          Write-Host "Final integrity and signature checks passed."
 
       - name: Upload AodFreeze package
         uses: actions/upload-artifact@v4
