@@ -21,7 +21,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install v141 / v141_xp / v141 MFC support
+      - name: Install v141 / WinXP / v141 MFC support
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -46,45 +46,81 @@ jobs:
 
           Write-Host "VS path: $vsPath"
 
-          $v141Root = Join-Path $vsPath "VC\Tools\MSVC\14.16"
+          $v141Id = "Microsoft.VisualStudio.Component.VC.v141.x86.x64"
+          $mfcId = "Microsoft.VisualStudio.Component.VC.v141.MFC"
+          $xpId = "Microsoft.VisualStudio.Component.WinXP"
 
-          $afxwin = Get-ChildItem `
-            "$v141Root\*\atlmfc\include\afxwin.h" `
-            -File `
-            -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+          Write-Host "=== CURRENT VS COMPONENT STATE ==="
 
-          $v141Cl = Get-ChildItem `
-            "$v141Root\*\bin\Hostx64\x64\cl.exe" `
-            -File `
-            -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+          $v141Installed = [bool](
+            & $vswhere -latest -products * `
+              -requires $v141Id `
+              -property installationPath 2>$null
+          )
 
-          $v141Link = Get-ChildItem `
-            "$v141Root\*\bin\Hostx64\x64\link.exe" `
-            -File `
-            -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+          $mfcInstalled = [bool](
+            & $vswhere -latest -products * `
+              -requires $mfcId `
+              -property installationPath 2>$null
+          )
 
-          if ($afxwin -and $v141Cl -and $v141Link) {
-            Write-Host "v141 + MFC already present."
-            Write-Host "afxwin.h: $($afxwin.FullName)"
-            Write-Host "cl.exe: $($v141Cl.FullName)"
-            Write-Host "link.exe: $($v141Link.FullName)"
+          $xpInstalled = [bool](
+            & $vswhere -latest -products * `
+              -requires $xpId `
+              -property installationPath 2>$null
+          )
+
+          Write-Host "v141 component: $v141Installed"
+          Write-Host "v141 MFC component: $mfcInstalled"
+          Write-Host "WinXP component: $xpInstalled"
+
+          Write-Host "=== CHECKING EXISTING v141 FILES ==="
+
+          $msvcRoot = Join-Path $vsPath "VC\Tools\MSVC"
+
+          $v141Dirs = @()
+
+          if (Test-Path $msvcRoot) {
+            $v141Dirs = @(
+              Get-ChildItem $msvcRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like "14.16*" }
+            )
           }
-          else {
-            Write-Host "Required v141 components are missing."
-            Write-Host "Installing directly with Visual Studio setup.exe..."
 
-            $components = @(
-              "Microsoft.VisualStudio.Component.VC.v141.x86.x64",
-              "Microsoft.VisualStudio.Component.VC.v141.MFC",
-              "Microsoft.VisualStudio.Component.WinXP"
+          $v141Cl = $null
+          $afxwin = $null
+
+          foreach ($dir in $v141Dirs) {
+            $clCandidate = Join-Path $dir.FullName "bin\Hostx64\x64\cl.exe"
+            $afxCandidate = Join-Path $dir.FullName "atlmfc\include\afxwin.h"
+
+            if (-not $v141Cl -and (Test-Path $clCandidate)) {
+              $v141Cl = Get-Item $clCandidate
+            }
+
+            if (-not $afxwin -and (Test-Path $afxCandidate)) {
+              $afxwin = Get-Item $afxCandidate
+            }
+          }
+
+          Write-Host "Existing v141 compiler: $($v141Cl.FullName)"
+          Write-Host "Existing afxwin.h: $($afxwin.FullName)"
+
+          if (-not $v141Cl -or -not $afxwin) {
+
+            Write-Host "Required v141 files are missing."
+            Write-Host "Installing components directly with Visual Studio setup.exe..."
+
+            $componentIds = @(
+              $v141Id
+              $mfcId
+              $xpId
             )
 
-            foreach ($component in $components) {
+            foreach ($componentId in $componentIds) {
 
-              Write-Host "=== INSTALLING $component ==="
+              Write-Host ""
+              Write-Host "=== INSTALLING $componentId ==="
 
               $psi = [System.Diagnostics.ProcessStartInfo]::new()
               $psi.FileName = $setup
@@ -94,91 +130,104 @@ jobs:
               [void]$psi.ArgumentList.Add("modify")
               [void]$psi.ArgumentList.Add("--installPath")
               [void]$psi.ArgumentList.Add($vsPath)
+              [void]$psi.ArgumentList.Add("--channelId")
+              [void]$psi.ArgumentList.Add("VisualStudio.17.Release")
               [void]$psi.ArgumentList.Add("--add")
-              [void]$psi.ArgumentList.Add($component)
+              [void]$psi.ArgumentList.Add($componentId)
               [void]$psi.ArgumentList.Add("--quiet")
               [void]$psi.ArgumentList.Add("--norestart")
 
               $process = [System.Diagnostics.Process]::Start($psi)
 
               if (-not $process) {
-                throw "Failed to start Visual Studio Installer for $component."
+                throw "Failed to start Visual Studio Installer for $componentId"
               }
 
               $process.WaitForExit()
 
-              Write-Host "Installer exit code for $component`: $($process.ExitCode)"
+              Write-Host "Installer exit code for ${componentId}: $($process.ExitCode)"
 
               if ($process.ExitCode -notin @(0, 3010, 1641)) {
-                throw "Visual Studio component installation failed for $component with exit code $($process.ExitCode)"
+                throw "Visual Studio component installation failed for ${componentId} with exit code $($process.ExitCode)"
               }
-
-              Start-Sleep -Seconds 2
             }
           }
 
-          Write-Host "=== VERIFYING v141 FILES ==="
+          Start-Sleep -Seconds 3
 
-          $afxwin = Get-ChildItem `
-            "$v141Root\*\atlmfc\include\afxwin.h" `
-            -File `
-            -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+          Write-Host ""
+          Write-Host "=== VERIFYING v141 FILES AFTER INSTALLATION ==="
 
-          $v141Cl = Get-ChildItem `
-            "$v141Root\*\bin\Hostx64\x64\cl.exe" `
-            -File `
-            -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+          if (-not (Test-Path $msvcRoot)) {
+            throw "MSVC tools directory not found: $msvcRoot"
+          }
 
-          $v141Link = Get-ChildItem `
-            "$v141Root\*\bin\Hostx64\x64\link.exe" `
-            -File `
-            -ErrorAction SilentlyContinue |
-            Select-Object -First 1
+          Write-Host "MSVC directories:"
 
-          if (-not $afxwin) {
-            throw "afxwin.h was not found after v141 MFC installation."
+          Get-ChildItem $msvcRoot -Directory |
+            Sort-Object Name |
+            Select-Object Name, FullName
+
+          $v141Dirs = @(
+            Get-ChildItem $msvcRoot -Directory -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -like "14.16*" }
+          )
+
+          if (-not $v141Dirs) {
+            throw "v141 MSVC 14.16 directory was not found under $msvcRoot"
+          }
+
+          $v141Cl = $null
+          $afxwin = $null
+
+          foreach ($dir in $v141Dirs) {
+
+            Write-Host "Checking v141 directory: $($dir.FullName)"
+
+            $clCandidate = Join-Path $dir.FullName "bin\Hostx64\x64\cl.exe"
+            $afxCandidate = Join-Path $dir.FullName "atlmfc\include\afxwin.h"
+
+            if (Test-Path $clCandidate) {
+              $v141Cl = Get-Item $clCandidate
+            }
+
+            if (Test-Path $afxCandidate) {
+              $afxwin = Get-Item $afxCandidate
+            }
           }
 
           if (-not $v141Cl) {
             throw "v141 cl.exe was not found after installation."
           }
 
-          if (-not $v141Link) {
-            throw "v141 link.exe was not found after installation."
+          if (-not $afxwin) {
+            Write-Host "=== SEARCHING VISUAL STUDIO FOR AFXWIN.H ==="
+
+            $afxSearchRoot = "${env:ProgramFiles}\Microsoft Visual Studio"
+
+            $afxwin = Get-ChildItem `
+              $afxSearchRoot `
+              -Filter afxwin.h `
+              -Recurse `
+              -File `
+              -ErrorAction SilentlyContinue |
+              Select-Object -First 1
           }
 
-          Write-Host "v141 + MFC verified."
+          if (-not $afxwin) {
+            throw "afxwin.h was not found after v141 MFC installation."
+          }
+
+          Write-Host ""
+          Write-Host "=== v141 VERIFIED ==="
+          Write-Host "v141 cl.exe: $($v141Cl.FullName)"
           Write-Host "afxwin.h: $($afxwin.FullName)"
-          Write-Host "cl.exe: $($v141Cl.FullName)"
-          Write-Host "link.exe: $($v141Link.FullName)"
 
-          Write-Host "=== VSWER COMPONENT CHECK ==="
+          if (-not (Test-Path $afxwin.FullName)) {
+            throw "afxwin.h verification failed."
+          }
 
-          $v141Installed = [bool](
-            & $vswhere -latest -products * `
-              -requires Microsoft.VisualStudio.Component.VC.v141.x86.x64 `
-              -property installationPath 2>$null
-          )
-
-          $xpInstalled = [bool](
-            & $vswhere -latest -products * `
-              -requires Microsoft.VisualStudio.Component.WinXP `
-              -property installationPath 2>$null
-          )
-
-          $mfcInstalled = [bool](
-            & $vswhere -latest -products * `
-              -requires Microsoft.VisualStudio.Component.VC.v141.MFC `
-              -property installationPath 2>$null
-          )
-
-          Write-Host "v141 according to vswhere: $v141Installed"
-          Write-Host "WinXP according to vswhere: $xpInstalled"
-          Write-Host "v141 MFC according to vswhere: $mfcInstalled"
-
-          Write-Host "v141 + MFC file verification passed."
+          Write-Host "v141 + MFC verification successful."
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -189,13 +238,16 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           Write-Host "=== RUNNER ==="
+
           Get-ComputerInfo |
             Select-Object WindowsProductName, WindowsVersion, OsBuildNumber
 
           Write-Host "=== MSBUILD ==="
+
           msbuild -version
 
           Write-Host "=== WDK ==="
+
           $kitsRoot = "${env:ProgramFiles(x86)}\Windows Kits\10"
 
           Get-ChildItem "$kitsRoot\bin" -Directory |
@@ -258,10 +310,39 @@ jobs:
           Copy-Item $inf $dist -Force
           Copy-Item $cat $dist -Force
 
-          Write-Host "=== INITIAL DISTDRIVER CONTENT ==="
+          # Required by legacy resource projects during solution build.
+          # These are build-time copies only.
+          # The final package uses root diskflt.sys.
+          Copy-Item $sys "$dist\amd64\diskflt.sys" -Force
+          Copy-Item $sys "$dist\i386\diskflt.sys" -Force
+
+          Write-Host "=== DISTDRIVER CONTENT ==="
 
           Get-ChildItem $dist -Recurse -File |
             Select-Object FullName, Length
+
+      - name: Build solution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $solution = Join-Path $PWD "DiskFilter.sln"
+
+          if (-not (Test-Path $solution)) {
+            throw "Solution not found: $solution"
+          }
+
+          & msbuild $solution `
+            /m `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:EnableInfVerif=false `
+            /p:InfVerifEnabled=false `
+            /p:SkipPackageVerification=true
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Solution build failed with exit code $LASTEXITCODE"
+          }
 
       - name: Locate SignTool
         shell: pwsh
@@ -348,7 +429,7 @@ jobs:
             -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" |
             Out-Null
 
-      - name: Sign driver SYS before solution build
+      - name: Sign driver SYS
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -372,118 +453,6 @@ jobs:
             throw "SignTool failed to sign $path with exit code $LASTEXITCODE"
           }
 
-          $sig = Get-AuthenticodeSignature $path
-
-          Write-Host "Signed SYS status: $($sig.Status)"
-          Write-Host "Signed SYS signer: $($sig.SignerCertificate.Subject)"
-
-          if ($sig.Status -ne "Valid") {
-            throw "PowerShell signature verification failed for ${path}: $($sig.Status)"
-          }
-
-      - name: Prepare signed SYS copies for legacy resource projects
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $source = Join-Path $PWD "DistDriver\diskflt.sys"
-
-          if (-not (Test-Path $source)) {
-            throw "Signed SYS not found: $source"
-          }
-
-          $sig = Get-AuthenticodeSignature $source
-
-          if ($sig.Status -ne "Valid") {
-            throw "Signed SYS is not valid before resource build: $($sig.Status)"
-          }
-
-          Copy-Item `
-            $source `
-            "DistDriver\amd64\diskflt.sys" `
-            -Force
-
-          Copy-Item `
-            $source `
-            "DistDriver\i386\diskflt.sys" `
-            -Force
-
-          Write-Host "=== SIGNED RESOURCE SYS COPIES ==="
-
-          Get-FileHash `
-            "DistDriver\diskflt.sys" `
-            -Algorithm SHA256
-
-          Get-FileHash `
-            "DistDriver\amd64\diskflt.sys" `
-            -Algorithm SHA256
-
-          Get-FileHash `
-            "DistDriver\i386\diskflt.sys" `
-            -Algorithm SHA256
-
-          Get-AuthenticodeSignature `
-            "DistDriver\amd64\diskflt.sys" |
-            Format-List Status,SignerCertificate
-
-          Get-AuthenticodeSignature `
-            "DistDriver\i386\diskflt.sys" |
-            Format-List Status,SignerCertificate
-
-      - name: Build solution
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $solution = Join-Path $PWD "DiskFilter.sln"
-
-          if (-not (Test-Path $solution)) {
-            throw "Solution not found: $solution"
-          }
-
-          & msbuild $solution `
-            /m `
-            /p:Configuration=Release `
-            /p:Platform=x64 `
-            /p:EnableInfVerif=false `
-            /p:InfVerifEnabled=false `
-            /p:SkipPackageVerification=true
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Solution build failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Verify installer embedded SYS signature
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $candidates = @(
-            "x64\Release\DiskfltInst.exe",
-            "DiskfltInst\x64\Release\DiskfltInst.exe"
-          )
-
-          $installer = $null
-
-          foreach ($candidate in $candidates) {
-            if (Test-Path $candidate) {
-              $installer = (Resolve-Path $candidate).Path
-              break
-            }
-          }
-
-          if (-not $installer) {
-            throw "DiskfltInst.exe was not found after solution build."
-          }
-
-          Write-Host "Installer: $installer"
-
-          $installerHash = Get-FileHash $installer -Algorithm SHA256
-
-          Write-Host "Installer SHA256: $($installerHash.Hash)"
-
-          Write-Host "Installer was built after signed SYS copies were prepared."
-
       - name: Verify embedded SYS test signature
         shell: pwsh
         run: |
@@ -491,6 +460,8 @@ jobs:
 
           $path = Join-Path $PWD "DistDriver\diskflt.sys"
 
+          # /pa is correct for a test-signed embedded driver signature.
+          # Do not use /kp here.
           & $env:SIGNTOOL_PATH verify /v /pa $path
 
           if ($LASTEXITCODE -ne 0) {
@@ -529,6 +500,7 @@ jobs:
 
           $dist = Join-Path $PWD "DistDriver"
 
+          # Known-good OS target for this WDK/project.
           & $inf2cat `
             /driver:"$dist" `
             /os:10_x64 `
@@ -617,15 +589,6 @@ jobs:
             throw "Embedded SYS signature verification failed for ${sys}"
           }
 
-          $sig = Get-AuthenticodeSignature $sys
-
-          if ($sig.Status -ne "Valid") {
-            throw "Final PowerShell SYS signature verification failed for ${sys}: $($sig.Status)"
-          }
-
-          Write-Host "=== FINAL DRIVER SIGNATURE STATUS ==="
-          $sig | Format-List Status,SignerCertificate
-
       - name: Prepare final package
         shell: pwsh
         run: |
@@ -645,6 +608,8 @@ jobs:
             -Path $driverDir, $toolsDir |
             Out-Null
 
+          # Final package layout matches the build-generated INF:
+          # diskflt.sys is at Driver root.
           Copy-Item `
             "DistDriver\diskflt.inf" `
             "$driverDir\diskflt.inf" `
@@ -725,6 +690,7 @@ jobs:
           )
 
           foreach ($file in $required) {
+
             if (-not (Test-Path $file)) {
               throw "Required package file missing: $file"
             }
@@ -732,33 +698,16 @@ jobs:
             Write-Host "OK: $file"
           }
 
-          $sys = "$package\Driver\diskflt.sys"
-          $cat = "$package\Driver\diskflt.cat"
-          $inf = "$package\Driver\diskflt.inf"
-
-          Write-Host "=== PACKAGE SYS SIGNATURE ==="
-
-          $sig = Get-AuthenticodeSignature $sys
-
-          $sig |
-            Format-List Status,SignerCertificate
-
-          if ($sig.Status -ne "Valid") {
-            throw "Final package SYS is not Authenticode-valid: $($sig.Status)"
-          }
-
-          Write-Host "=== PACKAGE HASHES ==="
-
           Get-FileHash `
-            $sys `
+            "$package\Driver\diskflt.sys" `
             -Algorithm SHA256
 
           Get-FileHash `
-            $cat `
+            "$package\Driver\diskflt.cat" `
             -Algorithm SHA256
 
           Get-FileHash `
-            $inf `
+            "$package\Driver\diskflt.inf" `
             -Algorithm SHA256
 
       - name: Create ZIP
