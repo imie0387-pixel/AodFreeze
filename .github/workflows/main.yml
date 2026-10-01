@@ -19,12 +19,48 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # ============================================================
-      # 1. BUILD DRIVER
-      # ============================================================
+      - name: Locate WDK tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $kits = @(
+            "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64",
+            "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x86"
+          )
+
+          $signtool = $null
+          $inf2cat = $null
+
+          foreach ($dir in $kits) {
+            if (-not $signtool -and (Test-Path "$dir\signtool.exe")) {
+              $signtool = "$dir\signtool.exe"
+            }
+
+            if (-not $inf2cat -and (Test-Path "$dir\inf2cat.exe")) {
+              $inf2cat = "$dir\inf2cat.exe"
+            }
+          }
+
+          if (-not $signtool) {
+            throw "Nie znaleziono signtool.exe"
+          }
+
+          if (-not $inf2cat) {
+            throw "Nie znaleziono inf2cat.exe"
+          }
+
+          "SIGNTOOL=$signtool" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "INF2CAT=$inf2cat" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          Write-Host "SIGNTOOL = $signtool"
+          Write-Host "INF2CAT  = $inf2cat"
 
       - name: Build driver x64
+        shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           msbuild DiskFilter\DiskFilter.vcxproj `
             /p:Configuration=Release `
             /p:Platform=x64 `
@@ -33,68 +69,251 @@ jobs:
             /p:SkipPackageVerification=true `
             /m
 
-      # ============================================================
-      # 2. PREPARE DistDriver
-      # ============================================================
+          if ($LASTEXITCODE -ne 0) {
+            throw "Build sterownika nie powiódł się."
+          }
 
-      - name: Prepare DistDriver
+      - name: Locate built driver files
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Remove-Item "DistDriver" -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "=== SZUKAM diskflt.sys ==="
 
-          New-Item -ItemType Directory -Force -Path "DistDriver"
-          New-Item -ItemType Directory -Force -Path "DistDriver\amd64"
-          New-Item -ItemType Directory -Force -Path "DistDriver\i386"
+          $sys = Get-ChildItem -Path . -Recurse -Filter "diskflt.sys" -File |
+            Where-Object {
+              $_.FullName -notmatch "\\DistDriver\\" -and
+              $_.FullName -notmatch "\\AodFreeze-package\\"
+            } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
 
-          $driver = "DiskFilter\x64\Release\diskflt.sys"
-          $inf = "DiskFilter\x64\Release\DiskFilter\diskflt.inf"
-          $cat = "DiskFilter\x64\Release\DiskFilter\diskflt.cat"
-
-          if (!(Test-Path $driver)) {
-            throw "BRAK: $driver"
+          if (-not $sys) {
+            throw "Nie znaleziono zbudowanego diskflt.sys"
           }
 
-          if (!(Test-Path $inf)) {
-            throw "BRAK: $inf"
+          Write-Host "SYS = $($sys.FullName)"
+
+          $inf = Get-ChildItem -Path . -Recurse -Filter "diskflt.inf" -File |
+            Where-Object {
+              $_.FullName -notmatch "\\DistDriver\\" -and
+              $_.FullName -notmatch "\\AodFreeze-package\\"
+            } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if (-not $inf) {
+            throw "Nie znaleziono diskflt.inf"
           }
 
-          if (!(Test-Path $cat)) {
-            throw "BRAK: $cat"
-          }
+          Write-Host "INF = $($inf.FullName)"
+
+          New-Item -ItemType Directory -Force -Path DistDriver\amd64
+          New-Item -ItemType Directory -Force -Path DistDriver\i386
 
           Copy-Item `
-            $driver `
-            "DistDriver\amd64\diskflt.sys" `
+            $sys.FullName `
+            DistDriver\amd64\diskflt.sys `
             -Force
 
           Copy-Item `
-            $driver `
-            "DistDriver\i386\diskflt.sys" `
+            $sys.FullName `
+            DistDriver\i386\diskflt.sys `
             -Force
 
           Copy-Item `
-            $inf `
-            "DistDriver\diskflt.inf" `
-            -Force
-
-          Copy-Item `
-            $cat `
-            "DistDriver\diskflt.cat" `
+            $inf.FullName `
+            DistDriver\diskflt.inf `
             -Force
 
           Write-Host "=== DistDriver ==="
+          Get-ChildItem DistDriver -Recurse
 
-          Get-ChildItem "DistDriver" -Recurse |
-            Select-Object FullName, Length
+      - name: Prepare test signing certificate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
 
-      # ============================================================
-      # 3. BUILD MANAGEMENT TOOLS
-      # ============================================================
+          $certName = "AodFreeze Test Certificate"
+
+          Write-Host "=== TWORZENIE CERTYFIKATU TESTOWEGO ==="
+
+          $existing = Get-ChildItem Cert:\LocalMachine\My |
+            Where-Object {
+              $_.Subject -eq "CN=$certName"
+            } |
+            Select-Object -First 1
+
+          if ($existing) {
+            Write-Host "Certyfikat już istnieje:"
+            $existing | Format-List Subject,Thumbprint,NotAfter
+            $cert = $existing
+          }
+          else {
+            $cert = New-SelfSignedCertificate `
+              -Type CodeSigningCert `
+              -Subject "CN=$certName" `
+              -CertStoreLocation "Cert:\LocalMachine\My" `
+              -KeyExportPolicy Exportable `
+              -KeySpec Signature `
+              -HashAlgorithm SHA256 `
+              -NotAfter (Get-Date "2039-12-31 23:59:59")
+
+            Write-Host "Utworzono nowy certyfikat:"
+            $cert | Format-List Subject,Thumbprint,NotAfter
+          }
+
+          $cer = Join-Path $env:GITHUB_WORKSPACE "AodFreeze-Test.cer"
+          $pfx = Join-Path $env:GITHUB_WORKSPACE "AodFreeze-Test.pfx"
+
+          Export-Certificate `
+            -Cert $cert `
+            -FilePath $cer `
+            -Force | Out-Null
+
+          $password = ConvertTo-SecureString `
+            "AodFreeze-Test-Only-2026!" `
+            -AsPlainText `
+            -Force
+
+          Export-PfxCertificate `
+            -Cert $cert `
+            -FilePath $pfx `
+            -Password $password `
+            -Force | Out-Null
+
+          "CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Append
+
+          "CERT_FILE=$cer" | Out-File `
+            -FilePath $env:GITHUB_ENV `
+            -Append
+
+          Write-Host "CERT = $cer"
+          Write-Host "PFX  = $pfx"
+          Write-Host "THUMBPRINT = $($cert.Thumbprint)"
+
+      - name: Trust test certificate on build runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=== IMPORT DO TRUSTED ROOT ==="
+
+          Import-Certificate `
+            -FilePath "$env:CERT_FILE" `
+            -CertStoreLocation "Cert:\LocalMachine\Root" | Out-Null
+
+          Write-Host "=== IMPORT DO TRUSTED PUBLISHER ==="
+
+          Import-Certificate `
+            -FilePath "$env:CERT_FILE" `
+            -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" | Out-Null
+
+          Write-Host "=== SPRAWDZENIE ROOT ==="
+
+          $root = Get-ChildItem Cert:\LocalMachine\Root |
+            Where-Object {
+              $_.Thumbprint -eq $env:CERT_THUMBPRINT
+            }
+
+          if (-not $root) {
+            throw "Certyfikat NIE znajduje się w LocalMachine\Root"
+          }
+
+          Write-Host "ROOT OK"
+
+          Write-Host "=== SPRAWDZENIE TRUSTED PUBLISHER ==="
+
+          $publisher = Get-ChildItem Cert:\LocalMachine\TrustedPublisher |
+            Where-Object {
+              $_.Thumbprint -eq $env:CERT_THUMBPRINT
+            }
+
+          if (-not $publisher) {
+            throw "Certyfikat NIE znajduje się w LocalMachine\TrustedPublisher"
+          }
+
+          Write-Host "TRUSTED PUBLISHER OK"
+
+          Write-Host "=== CERTYFIKAT ==="
+
+          $root |
+            Format-List Subject,Issuer,Thumbprint,NotBefore,NotAfter
+
+      - name: Sign driver SYS files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $files = @(
+            "DistDriver\amd64\diskflt.sys",
+            "DistDriver\i386\diskflt.sys"
+          )
+
+          foreach ($file in $files) {
+            if (-not (Test-Path $file)) {
+              throw "Brak pliku $file"
+            }
+
+            Write-Host ""
+            Write-Host "=== SIGN $file ==="
+
+            & "$env:SIGNTOOL" sign `
+              /v `
+              /fd SHA256 `
+              /sha1 $env:CERT_THUMBPRINT `
+              $file
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Nie udało się podpisać $file"
+            }
+          }
+
+      - name: Verify embedded SYS signatures
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $files = @(
+            "DistDriver\amd64\diskflt.sys",
+            "DistDriver\i386\diskflt.sys"
+          )
+
+          foreach ($file in $files) {
+            Write-Host ""
+            Write-Host "=== VERIFY $file ==="
+
+            & "$env:SIGNTOOL" verify `
+              /v `
+              /pa `
+              /o "10.0.26100.0" `
+              $file
+
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host ""
+              Write-Host "=== DODATKOWA WERYFIKACJA CERTYFIKATU ==="
+
+              & "$env:SIGNTOOL" verify `
+                /v `
+                /pa `
+                /r "AodFreeze Test Certificate" `
+                $file
+
+              if ($LASTEXITCODE -ne 0) {
+                throw "Weryfikacja podpisu SYS nie powiodła się: $file"
+              }
+            }
+
+            Write-Host "SYS SIGNATURE OK: $file"
+          }
 
       - name: Build management tools
+        shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           msbuild DiskFilter.sln `
             /p:Configuration=Release `
             /p:Platform=x64 `
@@ -103,225 +322,118 @@ jobs:
             /p:SkipPackageVerification=true `
             /m
 
-      # ============================================================
-      # 4. LOCATE SIGNTOOL
-      # ============================================================
-
-      - name: Locate WDK signing tools
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $signtool = Get-ChildItem `
-            "C:\Program Files (x86)\Windows Kits\10\bin" `
-            -Recurse `
-            -Filter "signtool.exe" `
-            -ErrorAction SilentlyContinue |
-            Where-Object {
-              $_.FullName -match "\\x64\\signtool\.exe$"
-            } |
-            Sort-Object FullName -Descending |
-            Select-Object -First 1
-
-          if (!$signtool) {
-            throw "Nie znaleziono signtool.exe"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Build narzędzi nie powiódł się."
           }
-
-          Write-Host "signtool = $($signtool.FullName)"
-
-          "SIGNTOOL=$($signtool.FullName)" >> $env:GITHUB_ENV
-
-      # ============================================================
-      # 5. CREATE TEST SIGNING CERTIFICATE
-      # ============================================================
-
-      - name: Prepare signing certificate
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          Write-Host "=== Creating AodFreeze test certificate ==="
-
-          Remove-Item `
-            "AodFreezeTest.cer" `
-            -Force `
-            -ErrorAction SilentlyContinue
-
-          $existing = Get-ChildItem `
-            Cert:\CurrentUser\My |
-            Where-Object {
-              $_.Subject -eq "CN=AodFreeze Test Certificate"
-            }
-
-          foreach ($cert in $existing) {
-            Remove-Item $cert.PSPath -Force
-          }
-
-          $cert = New-SelfSignedCertificate `
-            -Type CodeSigningCert `
-            -Subject "CN=AodFreeze Test Certificate" `
-            -CertStoreLocation "Cert:\CurrentUser\My" `
-            -HashAlgorithm SHA256 `
-            -KeyLength 2048 `
-            -NotAfter (Get-Date "2039-12-31")
-
-          if (!$cert) {
-            throw "Nie udało się utworzyć certyfikatu."
-          }
-
-          $thumbprint = $cert.Thumbprint
-
-          Write-Host "Certificate:"
-          Write-Host "Subject: $($cert.Subject)"
-          Write-Host "Thumbprint: $thumbprint"
-          Write-Host "Expires: $($cert.NotAfter)"
-
-          Export-Certificate `
-            -Cert $cert `
-            -FilePath "AodFreezeTest.cer" `
-            -Force
-
-          "SIGN_CERT_THUMBPRINT=$thumbprint" >> $env:GITHUB_ENV
-
-          Write-Host ""
-          Write-Host "Certificate exported to AodFreezeTest.cer"
-
-      # ============================================================
-      # 6. SIGN DRIVER
-      # ============================================================
-
-      - name: Sign driver SYS
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-
-          $sysFiles = @(
-            "DistDriver\amd64\diskflt.sys",
-            "DistDriver\i386\diskflt.sys"
-          )
-
-          foreach ($file in $sysFiles) {
-
-            if (!(Test-Path $file)) {
-              throw "BRAK pliku: $file"
-            }
-
-            Write-Host ""
-            Write-Host "=== SIGNING $file ==="
-
-            & $env:SIGNTOOL `
-              sign `
-              /v `
-              /fd SHA256 `
-              /sha1 $env:SIGN_CERT_THUMBPRINT `
-              "$file"
-
-            if ($LASTEXITCODE -ne 0) {
-              throw "Podpisywanie nie powiodło się: $file"
-            }
-          }
-
-      # ============================================================
-      # 7. VERIFY EMBEDDED SIGNATURES
-      # ============================================================
-
-      - name: Verify embedded SYS signatures
-        shell: pwsh
-        run: |
-          $sysFiles = @(
-            "DistDriver\amd64\diskflt.sys",
-            "DistDriver\i386\diskflt.sys"
-          )
-
-          foreach ($file in $sysFiles) {
-
-            Write-Host ""
-            Write-Host "=== VERIFY $file ==="
-
-            & $env:SIGNTOOL verify /pa /v "$file"
-
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host ""
-              Write-Host "INFO: Certyfikat testowy nie jest zaufany przez domyślny Windows trust store."
-              Write-Host "INFO: Podpis znajduje się w pliku i jest poprawny."
-              Write-Host "INFO: Na komputerze testowym certyfikat zostanie dodany do zaufanych."
-            }
-          }
-
-      # ============================================================
-      # 8. GENERATE CATALOG
-      # ============================================================
 
       - name: Generate catalog for Windows 11 25H2
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
+          Write-Host "=== USUWANIE STAREGO CAT ==="
+
           Remove-Item `
             "DistDriver\diskflt.cat" `
             -Force `
             -ErrorAction SilentlyContinue
 
-          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x86\inf2cat.exe" `
-            /driver:"DistDriver" `
-            /os:10_X64
+          Write-Host "=== INF2CAT WINDOWS 11 25H2 ==="
+
+          & "$env:INF2CAT" `
+            /driver:"$env:GITHUB_WORKSPACE\DistDriver" `
+            /os:10_25H2_X64 `
+            /verbose
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Inf2Cat zakończył się błędem: $LASTEXITCODE"
+            throw "Inf2Cat nie powiódł się."
           }
 
-          if (!(Test-Path "DistDriver\diskflt.cat")) {
-            throw "Brak DistDriver\diskflt.cat"
+          if (-not (Test-Path "DistDriver\diskflt.cat")) {
+            throw "Inf2Cat nie utworzył DistDriver\diskflt.cat"
           }
 
-          Write-Host "Catalog generated."
-
-      # ============================================================
-      # 9. SIGN CATALOG
-      # ============================================================
+          Write-Host "CAT GENERATED:"
+          Get-Item "DistDriver\diskflt.cat" |
+            Select-Object FullName,Length
 
       - name: Sign catalog
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
 
-          Write-Host "=== SIGNING CATALOG ==="
+          $cat = "DistDriver\diskflt.cat"
 
-          & $env:SIGNTOOL `
-            sign `
-            /v `
-            /fd SHA256 `
-            /sha1 $env:SIGN_CERT_THUMBPRINT `
-            "DistDriver\diskflt.cat"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Podpisywanie katalogu nie powiodło się."
+          if (-not (Test-Path $cat)) {
+            throw "Brak $cat"
           }
 
-      # ============================================================
-      # 10. VERIFY CATALOG
-      # ============================================================
+          Write-Host "=== SIGN CAT ==="
+
+          & "$env:SIGNTOOL" sign `
+            /v `
+            /fd SHA256 `
+            /sha1 $env:CERT_THUMBPRINT `
+            $cat
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Nie udało się podpisać katalogu."
+          }
 
       - name: Verify catalog signature
         shell: pwsh
         run: |
-          Write-Host "=== VERIFY CATALOG ==="
+          $ErrorActionPreference = "Stop"
 
-          & $env:SIGNTOOL `
-            verify `
-            /pa `
+          $cat = "DistDriver\diskflt.cat"
+
+          Write-Host "=== VERIFY CAT ==="
+
+          & "$env:SIGNTOOL" verify `
             /v `
-            "DistDriver\diskflt.cat"
+            /pa `
+            /o "10.0.26100.0" `
+            $cat
 
           if ($LASTEXITCODE -ne 0) {
             Write-Host ""
-            Write-Host "INFO: Certyfikat testowy nie jest zaufany na runnerze."
-            Write-Host "INFO: Podpis katalogu został wykonany."
+            Write-Host "=== DODATKOWA WERYFIKACJA CAT ==="
+
+            & "$env:SIGNTOOL" verify `
+              /v `
+              /pa `
+              /r "AodFreeze Test Certificate" `
+              $cat
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Weryfikacja podpisu CAT nie powiodła się."
+            }
           }
 
-      # ============================================================
-      # 11. PREPARE FINAL PACKAGE
-      # ============================================================
+          Write-Host "CAT SIGNATURE OK"
+
+      - name: Verify driver through catalog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $cat = "DistDriver\diskflt.cat"
+
+          Write-Host "=== VERIFY SYS THROUGH CAT ==="
+
+          & "$env:SIGNTOOL" verify `
+            /v `
+            /pa `
+            /c $cat `
+            "DistDriver\amd64\diskflt.sys"
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "CAT verification through /c did not pass."
+            Write-Host "Embedded SYS signature and CAT signature were already verified separately."
+          }
+          else {
+            Write-Host "SYS -> CAT verification OK"
+          }
 
       - name: Prepare AodFreeze package
         shell: pwsh
@@ -336,16 +448,21 @@ jobs:
             -Force `
             -ErrorAction SilentlyContinue
 
-          Remove-Item `
-            "AodFreeze-package.zip" `
+          New-Item `
+            -ItemType Directory `
             -Force `
-            -ErrorAction SilentlyContinue
+            -Path "$package\Driver\amd64"
 
-          New-Item -ItemType Directory -Force -Path "$package\Driver\amd64"
-          New-Item -ItemType Directory -Force -Path "$package\Driver\i386"
-          New-Item -ItemType Directory -Force -Path "$package\Tools"
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path "$package\Driver\i386"
 
-          # Driver files
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path "$package\Tools"
+
           Copy-Item `
             "DistDriver\diskflt.inf" `
             "$package\Driver\diskflt.inf" `
@@ -366,27 +483,22 @@ jobs:
             "$package\Driver\i386\diskflt.sys" `
             -Force
 
-          # Test certificate
-          Copy-Item `
-            "AodFreezeTest.cer" `
-            "$package\Driver\AodFreezeTest.cer" `
-            -Force
+          $toolFiles = @(
+            "x64\Release\DiskfltInst.exe",
+            "x64\Release\DiskfltBufmon.exe",
+            "x64\Release\diskfltmgmt.exe"
+          )
 
-          # Tools
-          Copy-Item `
-            "x64\Release\DiskfltInst.exe" `
-            "$package\Tools\DiskfltInst.exe" `
-            -Force
+          foreach ($tool in $toolFiles) {
+            if (-not (Test-Path $tool)) {
+              throw "Brak narzędzia: $tool"
+            }
 
-          Copy-Item `
-            "x64\Release\DiskfltBufmon.exe" `
-            "$package\Tools\DiskfltBufmon.exe" `
-            -Force
-
-          Copy-Item `
-            "x64\Release\diskfltmgmt.exe" `
-            "$package\Tools\diskfltmgmt.exe" `
-            -Force
+            Copy-Item `
+              $tool `
+              "$package\Tools\" `
+              -Force
+          }
 
           if (Test-Path "cabarc.exe") {
             Copy-Item `
@@ -396,101 +508,95 @@ jobs:
           }
 
           @"
-          AodFreeze
-          ==========
+AodFreeze
+=========
 
-          Driver:
-            Driver\diskflt.inf
-            Driver\diskflt.cat
-            Driver\amd64\diskflt.sys
-            Driver\i386\diskflt.sys
-            Driver\AodFreezeTest.cer
+Test-signed Windows 11 package.
 
-          Tools:
-            Tools\DiskfltInst.exe
-            Tools\DiskfltBufmon.exe
-            Tools\diskfltmgmt.exe
-            Tools\cabarc.exe (if present)
+Driver:
+  Driver\diskflt.inf
+  Driver\diskflt.cat
+  Driver\amd64\diskflt.sys
+  Driver\i386\diskflt.sys
 
-          Build:
-            Release
-            x64
-            Windows 11
-            WDK 10.0.26100.0
+Tools:
+  Tools\DiskfltInst.exe
+  Tools\DiskfltBufmon.exe
+  Tools\diskfltmgmt.exe
+  Tools\cabarc.exe
 
-          Signing:
-            TEST SIGNED
-            AodFreeze Test Certificate
+Target:
+  Windows 11 25H2 x64
+  WDK 10.0.26100.x
 
-          IMPORTANT:
-            This package is for Windows test-signing mode.
+Signing:
+  AodFreeze Test Certificate
 
-            Before installing the driver on the test computer,
-            import Driver\AodFreezeTest.cer into:
+IMPORTANT:
+  This is a TEST-SIGNED driver package.
+  The test certificate must be installed on the test computer.
+  Windows TESTSIGNING must be enabled.
 
-              Trusted Root Certification Authorities
-              Trusted Publishers
+Build:
+  GitHub Actions
+"@ |
+            Set-Content `
+              "$package\README.txt" `
+              -Encoding UTF8
 
-            Test signing must also be enabled:
-
-              bcdedit /set testsigning on
-
-            This is NOT Microsoft production signing.
-          "@ | Set-Content `
-            "$package\README.txt" `
-            -Encoding UTF8
-
-          Write-Host ""
           Write-Host "=== PACKAGE CONTENTS ==="
 
           Get-ChildItem `
             $package `
-            -Recurse |
-            Select-Object FullName, Length
+            -Recurse
 
           Compress-Archive `
             -Path "$package\*" `
             -DestinationPath "AodFreeze-package.zip" `
             -Force
 
-      # ============================================================
-      # 12. SHOW HASHES
-      # ============================================================
-
       - name: Show signatures and hashes
         shell: pwsh
         run: |
-          Write-Host "=== DRIVER HASHES ==="
-
-          Get-ChildItem `
-            "AodFreeze-package\Driver" `
-            -Recurse `
-            -Include *.sys,*.cat,*.cer |
-            ForEach-Object {
-
-              Write-Host ""
-              Write-Host "FILE: $($_.FullName)"
-
-              Get-FileHash `
-                $_.FullName `
-                -Algorithm SHA256
-            }
+          $ErrorActionPreference = "Stop"
 
           Write-Host ""
-          Write-Host "=== ZIP HASH ==="
+          Write-Host "========================================"
+          Write-Host " FINAL SIGNATURE CHECK"
+          Write-Host "========================================"
+
+          $files = @(
+            "AodFreeze-package\Driver\amd64\diskflt.sys",
+            "AodFreeze-package\Driver\i386\diskflt.sys",
+            "AodFreeze-package\Driver\diskflt.cat"
+          )
+
+          foreach ($file in $files) {
+            Write-Host ""
+            Write-Host "=== $file ==="
+
+            Get-FileHash `
+              $file `
+              -Algorithm SHA256
+
+            Get-AuthenticodeSignature `
+              $file |
+              Format-List Status,StatusMessage,SignerCertificate
+          }
+
+          Write-Host ""
+          Write-Host "=== ZIP ==="
 
           Get-FileHash `
             "AodFreeze-package.zip" `
             -Algorithm SHA256
 
-      # ============================================================
-      # 13. UPLOAD
-      # ============================================================
-
       - name: Upload AodFreeze signed test package
         uses: actions/upload-artifact@v4
         with:
           name: AodFreeze-signed-test
-          path: AodFreeze-package.zip
+          path: |
+            AodFreeze-package.zip
+            AodFreeze-Test.cer
           if-no-files-found: error
           retention-days: 30
