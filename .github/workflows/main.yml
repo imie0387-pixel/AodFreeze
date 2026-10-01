@@ -131,13 +131,6 @@ jobs:
 
           Write-Host "=== CREATING LEGACY RESOURCE INPUTS ==="
 
-          # The old management projects explicitly reference:
-          #   ..\DistDriver\amd64\diskflt.sys
-          #   ..\DistDriver\i386\diskflt.sys
-          #
-          # These copies are used only as build-time resources.
-          # The final x64 driver package uses DistDriver\diskflt.sys.
-
           Copy-Item `
             "DiskFilter\x64\Release\diskflt.sys" `
             "DistDriver\amd64\diskflt.sys" `
@@ -336,7 +329,7 @@ jobs:
             Select-Object Status, StatusMessage, Path, SignerCertificate
 
           if ($signature.Status -ne "Valid") {
-            throw "PowerShell signature verification failed for $path: $($signature.Status)"
+            throw "PowerShell signature verification failed for ${path}: $($signature.Status)"
           }
 
           Write-Host "Embedded SYS signature is valid."
