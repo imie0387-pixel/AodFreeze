@@ -14,39 +14,220 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install v141 XP support
+      - name: Install v141 and v141_xp support
         shell: pwsh
         run: |
-          Write-Host "=== INSTALL V141 XP SUPPORT ==="
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=================================================="
+          Write-Host "=== INSTALL V141 / V141_XP SUPPORT ==="
+          Write-Host "=================================================="
 
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $setup = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
 
           if (-not (Test-Path $vswhere)) {
-            throw "vswhere.exe not found"
+            throw "vswhere.exe not found: $vswhere"
           }
 
-          & $vswhere `
+          if (-not (Test-Path $setup)) {
+            throw "Visual Studio setup.exe not found: $setup"
+          }
+
+          Write-Host ""
+          Write-Host "=== VISUAL STUDIO INSTALLATIONS ==="
+
+          $instances = & $vswhere `
             -latest `
             -products * `
-            -requires Microsoft.VisualStudio.Component.VC.v141 `
             -format json
 
-          $vsInstaller = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+          Write-Host $instances
 
-          if (-not (Test-Path $vsInstaller)) {
-            throw "Visual Studio Installer not found"
+          $installationPath = & $vswhere `
+            -latest `
+            -products * `
+            -property installationPath
+
+          if (-not $installationPath) {
+            throw "Visual Studio installation path could not be detected."
           }
 
-          & $vsInstaller modify `
-            --installPath "C:\Program Files\Microsoft Visual Studio\2022\Enterprise" `
-            --add Microsoft.VisualStudio.Component.VC.v141 `
-            --add Microsoft.VisualStudio.Component.VC.v141.x86.x64 `
-            --quiet `
-            --norestart
+          $installationPath = $installationPath.Trim()
 
-          if ($LASTEXITCODE -ne 0) {
-            Write-Warning "v141 installation returned exit code $LASTEXITCODE"
+          Write-Host ""
+          Write-Host "Visual Studio installation path:"
+          Write-Host $installationPath
+
+          Write-Host ""
+          Write-Host "=== INSTALL REQUIRED COMPONENTS ==="
+
+          Write-Host ""
+          Write-Host "Adding:"
+          Write-Host "  Microsoft.VisualStudio.Component.VC.v141.x86.x64"
+          Write-Host "  Microsoft.VisualStudio.Component.WinXP"
+
+          $arguments = @(
+            "modify"
+            "--installPath"
+            $installationPath
+            "--add"
+            "Microsoft.VisualStudio.Component.VC.v141.x86.x64"
+            "--add"
+            "Microsoft.VisualStudio.Component.WinXP"
+            "--quiet"
+            "--norestart"
+          )
+
+          Write-Host ""
+          Write-Host "Running Visual Studio Installer..."
+
+          $process = Start-Process `
+            -FilePath $setup `
+            -ArgumentList $arguments `
+            -Wait `
+            -PassThru `
+            -NoNewWindow
+
+          Write-Host ""
+          Write-Host "Visual Studio Installer exit code:"
+          Write-Host $process.ExitCode
+
+          if ($process.ExitCode -ne 0) {
+            throw "Visual Studio component installation failed with exit code $($process.ExitCode)"
           }
+
+          Write-Host ""
+          Write-Host "=== VERIFY INSTALLED COMPONENTS ==="
+
+          $instanceJson = & $vswhere `
+            -latest `
+            -products * `
+            -format json
+
+          Write-Host $instanceJson
+
+          Write-Host ""
+          Write-Host "=== CHECK V141 TOOLSET FILES ==="
+
+          $vcRoot = Join-Path $installationPath "VC\Tools\MSVC"
+
+          if (-not (Test-Path $vcRoot)) {
+            throw "VC Tools directory not found: $vcRoot"
+          }
+
+          Get-ChildItem $vcRoot -Directory |
+            Sort-Object Name |
+            Select-Object Name, FullName
+
+          $v141Directories = Get-ChildItem $vcRoot -Directory |
+            Where-Object {
+              $_.Name -like "14.1*"
+            }
+
+          if (-not $v141Directories) {
+            throw "v141 MSVC toolset was not found under $vcRoot"
+          }
+
+          Write-Host ""
+          Write-Host "v141 directories found:"
+          $v141Directories | Select-Object Name, FullName
+
+          Write-Host ""
+          Write-Host "=== CHECK XP TOOLSET ==="
+
+          $xpFiles = @(
+            "$installationPath\VC\Tools\MSVC\14.16.27023\bin\HostX64\x64\cl.exe",
+            "$installationPath\VC\Tools\MSVC\14.16.27023\bin\HostX86\x86\cl.exe"
+          )
+
+          $foundXpCompiler = $false
+
+          foreach ($file in $xpFiles) {
+            if (Test-Path $file) {
+              Write-Host "FOUND: $file"
+              $foundXpCompiler = $true
+            }
+            else {
+              Write-Host "NOT FOUND: $file"
+            }
+          }
+
+          Write-Host ""
+          Write-Host "=== SEARCH FOR XP TOOLSET FILES ==="
+
+          $xpCandidates = Get-ChildItem `
+            $vcRoot `
+            -Recurse `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.Name -match 'v141_xp|xp\.props|xp\.targets|vcvars.*xp'
+            } |
+            Select-Object -First 100 FullName
+
+          if ($xpCandidates) {
+            $xpCandidates | ForEach-Object {
+              Write-Host $_.FullName
+            }
+          }
+          else {
+            Write-Warning "No obvious XP toolset files found by filename search."
+          }
+
+          Write-Host ""
+          Write-Host "=== CHECK V141_XP MSBUILD TOOLSET ==="
+
+          $msbuildToolset = "$installationPath\MSBuild\Microsoft\VC\v170\Platforms"
+
+          if (Test-Path $msbuildToolset) {
+            Get-ChildItem $msbuildToolset -Directory |
+              Select-Object Name, FullName
+          }
+
+          $xpTargets = Get-ChildItem `
+            "$installationPath\MSBuild" `
+            -Recurse `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.Name -match 'v141_xp|WindowsXP'
+            } |
+            Select-Object -First 100 FullName
+
+          if ($xpTargets) {
+            Write-Host ""
+            Write-Host "XP-related MSBuild files:"
+            $xpTargets | ForEach-Object {
+              Write-Host $_.FullName
+            }
+          }
+
+          Write-Host ""
+          Write-Host "=== FINAL V141_XP CHECK ==="
+
+          $xpMarkerFiles = Get-ChildItem `
+            $installationPath `
+            -Recurse `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.FullName -match 'v141_xp'
+            } |
+            Select-Object -First 20 FullName
+
+          if ($xpMarkerFiles) {
+            Write-Host "v141_xp-related files found:"
+            $xpMarkerFiles | ForEach-Object {
+              Write-Host $_.FullName
+            }
+          }
+          else {
+            Write-Warning "No v141_xp-named files were found."
+          }
+
+          Write-Host ""
+          Write-Host "Visual Studio component installation step completed."
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -54,25 +235,33 @@ jobs:
       - name: Inspect runner and WDK
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== RUNNER ==="
-          Get-ComputerInfo | Select-Object `
-            WindowsProductName,
-            WindowsVersion,
-            OsBuildNumber
+
+          Get-ComputerInfo |
+            Select-Object `
+              WindowsProductName,
+              WindowsVersion,
+              OsBuildNumber
 
           Write-Host ""
           Write-Host "=== MSBUILD ==="
+
           msbuild -version
 
           Write-Host ""
           Write-Host "=== WINDOWS KITS ==="
 
-          $kitsRoot = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $kitsRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10"
 
           if (Test-Path "$kitsRoot\bin") {
             Get-ChildItem "$kitsRoot\bin" -Directory |
               Sort-Object Name |
               Select-Object FullName
+          }
+          else {
+            Write-Warning "Windows Kits bin directory not found: $kitsRoot\bin"
           }
 
           Write-Host ""
@@ -83,29 +272,104 @@ jobs:
               Sort-Object Name |
               Select-Object Name, FullName
           }
+          else {
+            Write-Warning "Windows Kits Include directory not found: $kitsRoot\Include"
+          }
 
           Write-Host ""
           Write-Host "=== SOURCE TREE ==="
 
           Get-ChildItem -Recurse -File |
             Where-Object {
-              $_.FullName -notmatch '\\\.git\\'
+              $_.FullName -notmatch '\\.git\\'
             } |
             Select-Object FullName |
             Sort-Object FullName
 
+      - name: Verify v141_xp before build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "=================================================="
+          Write-Host "=== VERIFY V141_XP BEFORE BUILD ==="
+          Write-Host "=================================================="
+
+          $installationPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest `
+            -products * `
+            -property installationPath
+
+          if (-not $installationPath) {
+            throw "Unable to determine Visual Studio installation path."
+          }
+
+          $installationPath = $installationPath.Trim()
+
+          Write-Host "Visual Studio:"
+          Write-Host $installationPath
+
+          Write-Host ""
+          Write-Host "=== V141 TOOLSET DIRECTORIES ==="
+
+          $vcRoot = Join-Path $installationPath "VC\Tools\MSVC"
+
+          Get-ChildItem $vcRoot -Directory |
+            Sort-Object Name |
+            Select-Object Name, FullName
+
+          Write-Host ""
+          Write-Host "=== LOOKING FOR 14.16 TOOLSET ==="
+
+          $v141 = Get-ChildItem $vcRoot -Directory |
+            Where-Object {
+              $_.Name -eq "14.16.27023" -or $_.Name -like "14.16*"
+            }
+
+          if (-not $v141) {
+            throw "MSVC v141 (14.16) is not installed."
+          }
+
+          $v141 | Select-Object Name, FullName
+
+          Write-Host ""
+          Write-Host "=== LOOKING FOR V141_XP FILES ==="
+
+          $matches = Get-ChildItem `
+            $installationPath `
+            -Recurse `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.FullName -match 'v141_xp|WindowsXP'
+            } |
+            Select-Object -First 100 FullName
+
+          if (-not $matches) {
+            throw "v141_xp / WindowsXP support files were not found after installation."
+          }
+
+          $matches | ForEach-Object {
+            Write-Host $_.FullName
+          }
+
+          Write-Host ""
+          Write-Host "v141_xp verification completed."
+
       - name: Build driver
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== BUILD DRIVER ==="
 
-          $solution = Join-Path $PWD "DiskFilter\DiskFilter.vcxproj"
+          $project = Join-Path $PWD "DiskFilter\DiskFilter.vcxproj"
 
-          if (-not (Test-Path $solution)) {
-            throw "Driver project not found: $solution"
+          if (-not (Test-Path $project)) {
+            throw "Driver project not found: $project"
           }
 
-          & msbuild $solution `
+          & msbuild $project `
             /m `
             /p:Configuration=Release `
             /p:Platform=x64 `
@@ -121,6 +385,8 @@ jobs:
       - name: Prepare DistDriver
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== PREPARE DISTDRIVER ==="
 
           $dist = Join-Path $PWD "DistDriver"
@@ -129,9 +395,9 @@ jobs:
             Remove-Item $dist -Recurse -Force
           }
 
-          New-Item -ItemType Directory -Path $dist | Out-Null
-          New-Item -ItemType Directory -Path "$dist\amd64" | Out-Null
-          New-Item -ItemType Directory -Path "$dist\i386" | Out-Null
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+          New-Item -ItemType Directory -Path "$dist\amd64" -Force | Out-Null
+          New-Item -ItemType Directory -Path "$dist\i386" -Force | Out-Null
 
           $buildDir = Join-Path $PWD "DiskFilter\x64\Release\DiskFilter"
 
@@ -153,8 +419,8 @@ jobs:
           Copy-Item $sys "$dist\diskflt.sys" -Force
           Copy-Item $inf "$dist\diskflt.inf" -Force
 
-          # Legacy resource projects expect these paths during compilation.
-          # These are build-time resource copies, not final architecture-specific drivers.
+          # Required by legacy resource compilation projects.
+          # These are build-time copies of the x64 driver.
           Copy-Item $sys "$dist\amd64\diskflt.sys" -Force
           Copy-Item $sys "$dist\i386\diskflt.sys" -Force
 
@@ -167,6 +433,8 @@ jobs:
       - name: Build solution
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== BUILD SOLUTION ==="
 
           $solution = Join-Path $PWD "DiskFilter.sln"
@@ -191,9 +459,11 @@ jobs:
       - name: Locate SignTool and Inf2Cat
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== LOCATE SIGNTOOL ==="
 
-          $kitsRoot = "${env:ProgramFiles(x86)}\Windows Kits\10"
+          $kitsRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10"
 
           $signTools = Get-ChildItem `
             "$kitsRoot\bin" `
@@ -258,16 +528,11 @@ jobs:
           foreach ($item in $inf2cats) {
             Write-Host $item.FullName
 
-            try {
-              $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($item.FullName)
+            $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($item.FullName)
 
-              Write-Host "  FileVersion    : $($version.FileVersion)"
-              Write-Host "  ProductVersion : $($version.ProductVersion)"
-              Write-Host "  ProductName    : $($version.ProductName)"
-            }
-            catch {
-              Write-Warning "Unable to read version information"
-            }
+            Write-Host "  FileVersion    : $($version.FileVersion)"
+            Write-Host "  ProductVersion : $($version.ProductVersion)"
+            Write-Host "  ProductName    : $($version.ProductName)"
           }
 
           "SIGNTOOL_PATH=$signTool" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -276,6 +541,8 @@ jobs:
       - name: Inspect Inf2Cat capabilities
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== INF2CAT CAPABILITIES ==="
 
           $inf2cat = $env:INF2CAT_PATH
@@ -284,17 +551,17 @@ jobs:
             throw "Inf2Cat not found: $inf2cat"
           }
 
+          Write-Host ""
           Write-Host "Path:"
           Write-Host $inf2cat
 
           Write-Host ""
           Write-Host "Version:"
+
           & $inf2cat /?
 
-          $helpExitCode = $LASTEXITCODE
-
           Write-Host ""
-          Write-Host "Inf2Cat /? exit code: $helpExitCode"
+          Write-Host "Inf2Cat help exit code: $LASTEXITCODE"
 
           Write-Host ""
           Write-Host "=== INF2CAT FILE VERSION ==="
@@ -308,6 +575,8 @@ jobs:
       - name: Create test certificate
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== CREATE TEST CERTIFICATE ==="
 
           $existing = Get-ChildItem Cert:\LocalMachine\My |
@@ -356,6 +625,8 @@ jobs:
       - name: Trust test certificate on runner
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== TRUST TEST CERTIFICATE ==="
 
           Import-Certificate `
@@ -371,6 +642,8 @@ jobs:
       - name: Sign driver SYS
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== SIGN DRIVER SYS ==="
 
           $path = Join-Path $PWD "DistDriver\diskflt.sys"
@@ -395,11 +668,14 @@ jobs:
           Write-Host ""
           Write-Host "=== SYS AUTHENTICODE SIGNATURE ==="
 
-          Get-AuthenticodeSignature $path | Format-List *
+          Get-AuthenticodeSignature $path |
+            Format-List *
 
       - name: Verify embedded test signature
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== VERIFY EMBEDDED TEST SIGNATURE ==="
 
           $path = Join-Path $PWD "DistDriver\diskflt.sys"
@@ -427,6 +703,8 @@ jobs:
       - name: Generate catalog with detailed diagnostics
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=================================================="
           Write-Host "=== INF2CAT DIAGNOSTIC RUN ==="
           Write-Host "=================================================="
@@ -449,7 +727,9 @@ jobs:
 
           Write-Host ""
           Write-Host "Inf2Cat version:"
+
           $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($inf2cat)
+
           Write-Host "FileVersion    : $($version.FileVersion)"
           Write-Host "ProductVersion : $($version.ProductVersion)"
 
@@ -459,9 +739,11 @@ jobs:
 
           Write-Host ""
           Write-Host "INF CONTENT:"
-          Get-Content $inf | ForEach-Object {
-            Write-Host $_
-          }
+
+          Get-Content $inf |
+            ForEach-Object {
+              Write-Host $_
+            }
 
           Write-Host ""
           Write-Host "DISTDRIVER TREE BEFORE INF2CAT:"
@@ -521,9 +803,6 @@ jobs:
           if ($exit10x64 -eq 0) {
             Write-Host ""
             Write-Host "SUCCESS: 10_x64 accepted."
-            Write-Host ""
-            Write-Host "This runner's Inf2Cat does not accept 10_25H2_X64,"
-            Write-Host "but accepts 10_x64."
 
             if (-not (Test-Path "$dist\diskflt.cat")) {
               throw "Inf2Cat reported success but diskflt.cat was not created."
@@ -539,7 +818,7 @@ jobs:
 
           Write-Host ""
           Write-Host "25H2 exit code : $exit25H2"
-          Write-Host "10_x64 exit   : $exit10x64"
+          Write-Host "10_x64 exit    : $exit10x64"
 
           Write-Host ""
           Write-Host "Final DistDriver tree:"
@@ -553,6 +832,8 @@ jobs:
       - name: Add WDK catalog metadata
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== ADD WDK CATALOG METADATA ==="
 
           $drvcatCandidates = Get-ChildItem `
@@ -575,7 +856,8 @@ jobs:
             Select-Object -First 1
 
           if (-not $drvcat) {
-            $drvcat = $drvcatCandidates | Select-Object -First 1
+            $drvcat = $drvcatCandidates |
+              Select-Object -First 1
           }
 
           Write-Host "Using drvcat:"
@@ -599,6 +881,8 @@ jobs:
       - name: Sign catalog
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== SIGN CATALOG ==="
 
           $path = Join-Path $PWD "DistDriver\diskflt.cat"
@@ -623,6 +907,8 @@ jobs:
       - name: Verify catalog and package signatures
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== VERIFY FINAL SIGNATURES ==="
 
           $dist = Join-Path $PWD "DistDriver"
@@ -664,7 +950,7 @@ jobs:
           & $env:SIGNTOOL_PATH verify /v /pa $sys
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Kernel-mode embedded test signature verification failed for ${sys}: exit code $LASTEXITCODE"
+            throw "Embedded test signature verification failed for ${sys}: exit code $LASTEXITCODE"
           }
 
           Write-Host ""
@@ -681,6 +967,8 @@ jobs:
       - name: Prepare final package
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== PREPARE FINAL PACKAGE ==="
 
           $package = Join-Path $PWD "AodFreeze-package"
@@ -749,6 +1037,8 @@ jobs:
       - name: Final integrity checks
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== FINAL INTEGRITY CHECKS ==="
 
           $package = Join-Path $PWD "AodFreeze-package"
@@ -784,6 +1074,8 @@ jobs:
       - name: Create ZIP
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "=== CREATE ZIP ==="
 
           $package = Join-Path $PWD "AodFreeze-package"
