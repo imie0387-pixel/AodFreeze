@@ -1,10 +1,10 @@
-name: Build AodFreeze
+name: Build AodFreeze - Microsoft Attestation
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - master
-  workflow_dispatch:
 
 concurrency:
   group: aodfreeze-${{ github.ref }}
@@ -44,13 +44,46 @@ jobs:
             throw "Visual Studio installation path could not be detected."
           }
 
-          Write-Host "VS path: $vsPath"
+          $v141Id = 'Microsoft.VisualStudio.Component.VC.v141.x86.x64'
+          $mfcId  = 'Microsoft.VisualStudio.Component.VC.v141.MFC'
+          $xpId   = 'Microsoft.VisualStudio.Component.WinXP'
 
-          $v141Id = "Microsoft.VisualStudio.Component.VC.v141.x86.x64"
-          $mfcId = "Microsoft.VisualStudio.Component.VC.v141.MFC"
-          $xpId = "Microsoft.VisualStudio.Component.WinXP"
+          $msvcRoot = Join-Path $vsPath 'VC\Tools\MSVC'
 
-          Write-Host "=== CURRENT VS COMPONENT STATE ==="
+          function Test-V141Files {
+            $dirs = @(
+              Get-ChildItem $msvcRoot -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like '14.16*' }
+            )
+
+            $cl = $null
+            $afx = $null
+
+            foreach ($dir in $dirs) {
+              foreach ($hostArch in @('HostX86', 'Hostx64')) {
+                foreach ($targetArch in @('x64', 'x86')) {
+                  $candidate = Join-Path $dir.FullName "bin\$hostArch\$targetArch\cl.exe"
+
+                  if (-not $cl -and (Test-Path $candidate)) {
+                    $cl = Get-Item $candidate
+                  }
+                }
+              }
+
+              $afxCandidate = Join-Path $dir.FullName 'atlmfc\include\afxwin.h'
+
+              if (-not $afx -and (Test-Path $afxCandidate)) {
+                $afx = Get-Item $afxCandidate
+              }
+            }
+
+            return [pscustomobject]@{
+              Cl     = $cl
+              Afxwin = $afx
+            }
+          }
+
+          $files = Test-V141Files
 
           $v141Installed = [bool](
             & $vswhere -latest -products * `
@@ -70,196 +103,78 @@ jobs:
               -property installationPath 2>$null
           )
 
+          Write-Host "VS: $vsPath"
           Write-Host "v141 component: $v141Installed"
           Write-Host "v141 MFC component: $mfcInstalled"
           Write-Host "WinXP component: $xpInstalled"
+          Write-Host "v141 cl.exe: $($files.Cl.FullName)"
+          Write-Host "afxwin.h: $($files.Afxwin.FullName)"
 
-          Write-Host "=== CHECKING EXISTING v141 FILES ==="
-
-          $msvcRoot = Join-Path $vsPath "VC\Tools\MSVC"
-
-          $v141Dirs = @()
-
-          if (Test-Path $msvcRoot) {
-            $v141Dirs = @(
-              Get-ChildItem $msvcRoot -Directory -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -like "14.16*" }
-            )
-          }
-
-          $v141Cl = $null
-          $afxwin = $null
-
-          foreach ($dir in $v141Dirs) {
-            $clCandidate = Join-Path $dir.FullName "bin\Hostx64\x64\cl.exe"
-            $afxCandidate = Join-Path $dir.FullName "atlmfc\include\afxwin.h"
-
-            if (-not $v141Cl -and (Test-Path $clCandidate)) {
-              $v141Cl = Get-Item $clCandidate
-            }
-
-            if (-not $afxwin -and (Test-Path $afxCandidate)) {
-              $afxwin = Get-Item $afxCandidate
-            }
-          }
-
-          Write-Host "Existing v141 compiler: $($v141Cl.FullName)"
-          Write-Host "Existing afxwin.h: $($afxwin.FullName)"
-
-          if (-not $v141Cl -or -not $afxwin) {
-
-            Write-Host "Required v141 files are missing."
-            Write-Host "Installing components directly with Visual Studio setup.exe..."
-
-            $componentIds = @(
-              $v141Id
-              $mfcId
-              $xpId
-            )
-
-            foreach ($componentId in $componentIds) {
-
-              Write-Host ""
-              Write-Host "=== INSTALLING $componentId ==="
-
+          if (
+            -not $v141Installed -or
+            -not $mfcInstalled -or
+            -not $xpInstalled -or
+            -not $files.Cl -or
+            -not $files.Afxwin
+          ) {
+            foreach ($componentId in @($v141Id, $mfcId, $xpId)) {
               $psi = [System.Diagnostics.ProcessStartInfo]::new()
               $psi.FileName = $setup
               $psi.UseShellExecute = $false
               $psi.CreateNoWindow = $true
 
-              [void]$psi.ArgumentList.Add("modify")
-              [void]$psi.ArgumentList.Add("--installPath")
-              [void]$psi.ArgumentList.Add($vsPath)
-              [void]$psi.ArgumentList.Add("--channelId")
-              [void]$psi.ArgumentList.Add("VisualStudio.17.Release")
-              [void]$psi.ArgumentList.Add("--add")
-              [void]$psi.ArgumentList.Add($componentId)
-              [void]$psi.ArgumentList.Add("--quiet")
-              [void]$psi.ArgumentList.Add("--norestart")
+              foreach ($arg in @(
+                'modify',
+                '--installPath',
+                $vsPath,
+                '--channelId',
+                'VisualStudio.17.Release',
+                '--add',
+                $componentId,
+                '--quiet',
+                '--norestart'
+              )) {
+                [void]$psi.ArgumentList.Add($arg)
+              }
 
               $process = [System.Diagnostics.Process]::Start($psi)
 
               if (-not $process) {
-                throw "Failed to start Visual Studio Installer for $componentId"
+                throw "Failed to start VS Installer for $componentId"
               }
 
               $process.WaitForExit()
 
-              Write-Host "Installer exit code for ${componentId}: $($process.ExitCode)"
-
               if ($process.ExitCode -notin @(0, 3010, 1641)) {
-                throw "Visual Studio component installation failed for ${componentId} with exit code $($process.ExitCode)"
+                throw "VS component installation failed for ${componentId}: $($process.ExitCode)"
               }
             }
           }
 
           Start-Sleep -Seconds 3
 
-          Write-Host ""
-          Write-Host "=== VERIFYING v141 FILES AFTER INSTALLATION ==="
+          $files = Test-V141Files
 
-          if (-not (Test-Path $msvcRoot)) {
-            throw "MSVC tools directory not found: $msvcRoot"
+          if (-not $files.Cl) {
+            throw 'v141 cl.exe was not found after installation.'
           }
 
-          Write-Host "MSVC directories:"
-
-          Get-ChildItem $msvcRoot -Directory |
-            Sort-Object Name |
-            Select-Object Name, FullName
-
-          $v141Dirs = @(
-            Get-ChildItem $msvcRoot -Directory -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -like "14.16*" }
-          )
-
-          if (-not $v141Dirs) {
-            throw "v141 MSVC 14.16 directory was not found under $msvcRoot"
+          if (-not $files.Afxwin) {
+            throw 'v141 afxwin.h was not found after installation.'
           }
 
-          $v141Cl = $null
-          $afxwin = $null
-
-          foreach ($dir in $v141Dirs) {
-
-            Write-Host "Checking v141 directory: $($dir.FullName)"
-
-            $clCandidate = Join-Path $dir.FullName "bin\Hostx64\x64\cl.exe"
-            $afxCandidate = Join-Path $dir.FullName "atlmfc\include\afxwin.h"
-
-            if (Test-Path $clCandidate) {
-              $v141Cl = Get-Item $clCandidate
-            }
-
-            if (Test-Path $afxCandidate) {
-              $afxwin = Get-Item $afxCandidate
-            }
-          }
-
-          if (-not $v141Cl) {
-            throw "v141 cl.exe was not found after installation."
-          }
-
-          if (-not $afxwin) {
-            Write-Host "=== SEARCHING VISUAL STUDIO FOR AFXWIN.H ==="
-
-            $afxSearchRoot = "${env:ProgramFiles}\Microsoft Visual Studio"
-
-            $afxwin = Get-ChildItem `
-              $afxSearchRoot `
-              -Filter afxwin.h `
-              -Recurse `
-              -File `
-              -ErrorAction SilentlyContinue |
-              Select-Object -First 1
-          }
-
-          if (-not $afxwin) {
-            throw "afxwin.h was not found after v141 MFC installation."
-          }
-
-          Write-Host ""
-          Write-Host "=== v141 VERIFIED ==="
-          Write-Host "v141 cl.exe: $($v141Cl.FullName)"
-          Write-Host "afxwin.h: $($afxwin.FullName)"
-
-          if (-not (Test-Path $afxwin.FullName)) {
-            throw "afxwin.h verification failed."
-          }
-
-          Write-Host "v141 + MFC verification successful."
+          Write-Host "v141 verified: $($files.Cl.FullName)"
+          Write-Host "MFC verified: $($files.Afxwin.FullName)"
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
-
-      - name: Runner diagnostics
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          Write-Host "=== RUNNER ==="
-
-          Get-ComputerInfo |
-            Select-Object WindowsProductName, WindowsVersion, OsBuildNumber
-
-          Write-Host "=== MSBUILD ==="
-
-          msbuild -version
-
-          Write-Host "=== WDK ==="
-
-          $kitsRoot = "${env:ProgramFiles(x86)}\Windows Kits\10"
-
-          Get-ChildItem "$kitsRoot\bin" -Directory |
-            Sort-Object Name |
-            Select-Object Name, FullName
 
       - name: Build driver
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $project = Join-Path $PWD "DiskFilter\DiskFilter.vcxproj"
+          $project = Join-Path $PWD 'DiskFilter\DiskFilter.vcxproj'
 
           if (-not (Test-Path $project)) {
             throw "Driver project not found: $project"
@@ -277,56 +192,45 @@ jobs:
             throw "Driver build failed with exit code $LASTEXITCODE"
           }
 
-      - name: Prepare DistDriver
+      - name: Prepare DistDriver for solution build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $dist = Join-Path $PWD "DistDriver"
+          $dist = Join-Path $PWD 'DistDriver'
 
-          New-Item -ItemType Directory -Force -Path `
-            $dist, `
-            "$dist\amd64", `
-            "$dist\i386" |
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path `
+              $dist, `
+              "$dist\amd64", `
+              "$dist\i386" |
             Out-Null
 
-          $sys = Join-Path $PWD "DiskFilter\x64\Release\diskflt.sys"
-          $inf = Join-Path $PWD "DiskFilter\x64\Release\DiskFilter\diskflt.inf"
-          $cat = Join-Path $PWD "DiskFilter\x64\Release\DiskFilter\diskflt.cat"
+          $sys = Join-Path $PWD 'DiskFilter\x64\Release\diskflt.sys'
+          $inf = Join-Path $PWD 'DiskFilter\x64\Release\DiskFilter\diskflt.inf'
+          $cat = Join-Path $PWD 'DiskFilter\x64\Release\DiskFilter\diskflt.cat'
 
-          if (-not (Test-Path $sys)) {
-            throw "Built SYS not found: $sys"
-          }
-
-          if (-not (Test-Path $inf)) {
-            throw "Built INF not found: $inf"
-          }
-
-          if (-not (Test-Path $cat)) {
-            throw "Built CAT not found: $cat"
+          foreach ($file in @($sys, $inf, $cat)) {
+            if (-not (Test-Path $file)) {
+              throw "Required build output not found: $file"
+            }
           }
 
           Copy-Item $sys $dist -Force
           Copy-Item $inf $dist -Force
           Copy-Item $cat $dist -Force
 
-          # Required by legacy resource projects during solution build.
-          # These are build-time copies only.
-          # The final package uses root diskflt.sys.
           Copy-Item $sys "$dist\amd64\diskflt.sys" -Force
           Copy-Item $sys "$dist\i386\diskflt.sys" -Force
 
-          Write-Host "=== DISTDRIVER CONTENT ==="
-
-          Get-ChildItem $dist -Recurse -File |
-            Select-Object FullName, Length
-
-      - name: Build solution
+      - name: Build full solution
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $solution = Join-Path $PWD "DiskFilter.sln"
+          $solution = Join-Path $PWD 'DiskFilter.sln'
 
           if (-not (Test-Path $solution)) {
             throw "Solution not found: $solution"
@@ -344,148 +248,57 @@ jobs:
             throw "Solution build failed with exit code $LASTEXITCODE"
           }
 
-      - name: Locate SignTool
+      - name: Prepare Microsoft attestation submission
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $preferred = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
+          $submission = Join-Path $PWD 'AttestationSubmission'
+          $driverDir = Join-Path $submission 'amd64'
 
-          if (Test-Path $preferred) {
-            $signtool = $preferred
-          }
-          else {
-            $signtool = Get-ChildItem `
-              "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
-              -Filter signtool.exe `
-              -Recurse `
-              -File `
-              -ErrorAction SilentlyContinue |
-              Where-Object {
-                $_.FullName -match '\\x64\\signtool\.exe$'
-              } |
-              Sort-Object FullName -Descending |
-              Select-Object -First 1 -ExpandProperty FullName
+          if (Test-Path $submission) {
+            Remove-Item $submission -Recurse -Force
           }
 
-          if (-not $signtool) {
-            throw "signtool.exe not found."
-          }
-
-          Write-Host "SignTool: $signtool"
-
-          "SIGNTOOL_PATH=$signtool" >> $env:GITHUB_ENV
-
-      - name: Create test certificate
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $cert = Get-ChildItem Cert:\LocalMachine\My |
-            Where-Object {
-              $_.Subject -eq "CN=AodFreeze Test Certificate" -and
-              $_.HasPrivateKey
-            } |
-            Select-Object -First 1
-
-          if (-not $cert) {
-
-            $cert = New-SelfSignedCertificate `
-              -Type CodeSigningCert `
-              -Subject "CN=AodFreeze Test Certificate" `
-              -CertStoreLocation "Cert:\LocalMachine\My" `
-              -KeyAlgorithm RSA `
-              -KeyLength 2048 `
-              -HashAlgorithm SHA256 `
-              -NotAfter (Get-Date).AddYears(13)
-          }
-
-          "CERT_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
-
-          Export-Certificate `
-            -Cert $cert `
-            -FilePath (Join-Path $PWD "AodFreeze-Test.cer") `
-            -Force |
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $driverDir |
             Out-Null
 
-          Write-Host "Certificate: $($cert.Subject)"
-          Write-Host "Thumbprint: $($cert.Thumbprint)"
-          Write-Host "Expires: $($cert.NotAfter)"
+          $sys = Join-Path $PWD 'DiskFilter\x64\Release\diskflt.sys'
+          $inf = Join-Path $PWD 'DiskFilter\x64\Release\DiskFilter\diskflt.inf'
+          $pdb = Join-Path $PWD 'DiskFilter\x64\Release\diskflt.pdb'
 
-      - name: Trust test certificate
+          foreach ($file in @($sys, $inf, $pdb)) {
+            if (-not (Test-Path $file)) {
+              throw "Attestation input not found: $file"
+            }
+          }
+
+          Copy-Item $sys $driverDir -Force
+          Copy-Item $inf $driverDir -Force
+          Copy-Item $pdb $driverDir -Force
+
+          Write-Host '=== ATTESTATION INPUT ==='
+
+          Get-ChildItem $submission -Recurse -File |
+            Select-Object FullName, Length
+
+      - name: Locate Inf2Cat and MakeCab
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $certFile = Join-Path $PWD "AodFreeze-Test.cer"
+          $kits = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
 
-          Import-Certificate `
-            -FilePath $certFile `
-            -CertStoreLocation "Cert:\LocalMachine\Root" |
-            Out-Null
-
-          Import-Certificate `
-            -FilePath $certFile `
-            -CertStoreLocation "Cert:\LocalMachine\TrustedPublisher" |
-            Out-Null
-
-      - name: Sign driver SYS
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $path = Join-Path $PWD "DistDriver\diskflt.sys"
-
-          if (-not (Test-Path $path)) {
-            throw "SYS not found: $path"
-          }
-
-          & $env:SIGNTOOL_PATH `
-            sign `
-            /v `
-            /fd sha256 `
-            /sm `
-            /s My `
-            /sha1 $env:CERT_THUMBPRINT `
-            $path
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "SignTool failed to sign $path with exit code $LASTEXITCODE"
-          }
-
-      - name: Verify embedded SYS test signature
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $path = Join-Path $PWD "DistDriver\diskflt.sys"
-
-          # /pa is correct for a test-signed embedded driver signature.
-          # Do not use /kp here.
-          & $env:SIGNTOOL_PATH verify /v /pa $path
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Embedded test signature verification failed for ${path}"
-          }
-
-          $sig = Get-AuthenticodeSignature $path
-
-          Write-Host "Signature status: $($sig.Status)"
-
-          if ($sig.Status -ne "Valid") {
-            throw "PowerShell signature verification failed for ${path}: $($sig.Status)"
-          }
-
-      - name: Regenerate catalog after SYS signing
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $inf2cat = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.26100.0\x86\Inf2Cat.exe"
+          $inf2cat = Join-Path `
+            $kits `
+            '10.0.26100.0\x86\Inf2Cat.exe'
 
           if (-not (Test-Path $inf2cat)) {
             $inf2cat = Get-ChildItem `
-              "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+              $kits `
               -Filter Inf2Cat.exe `
               -Recurse `
               -File `
@@ -495,14 +308,27 @@ jobs:
           }
 
           if (-not $inf2cat) {
-            throw "Inf2Cat.exe not found."
+            throw 'Inf2Cat.exe not found.'
           }
 
-          $dist = Join-Path $PWD "DistDriver"
+          $makecab = "$env:windir\System32\makecab.exe"
 
-          # Known-good OS target for this WDK/project.
-          & $inf2cat `
-            /driver:"$dist" `
+          if (-not (Test-Path $makecab)) {
+            throw "makecab.exe not found: $makecab"
+          }
+
+          "INF2CAT_PATH=$inf2cat" >> $env:GITHUB_ENV
+          "MAKECAB_PATH=$makecab" >> $env:GITHUB_ENV
+
+      - name: Generate attestation catalog
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $submission = Join-Path $PWD 'AttestationSubmission'
+
+          & $env:INF2CAT_PATH `
+            /driver:"$submission" `
             /os:10_x64 `
             /verbose
 
@@ -510,231 +336,195 @@ jobs:
             throw "Inf2Cat failed with exit code $LASTEXITCODE"
           }
 
-          $cat = Join-Path $dist "diskflt.cat"
+          $cat = Join-Path `
+            $submission `
+            'amd64\diskflt.cat'
 
           if (-not (Test-Path $cat)) {
             throw "Inf2Cat did not create: $cat"
           }
 
-          $drvcat = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.26100.0\x86\drvcat.exe"
-
-          if (Test-Path $drvcat) {
-
-            & $drvcat `
-              $cat `
-              /set WdkVersion 10.0.26100.0 `
-              /set WdkAssemblyVersion 10.0.26100.4202
-
-            if ($LASTEXITCODE -ne 0) {
-              throw "drvcat failed with exit code $LASTEXITCODE"
-            }
-          }
-
-      - name: Sign catalog
+      - name: Create attestation CAB
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $path = Join-Path $PWD "DistDriver\diskflt.cat"
+          $submission = Join-Path $PWD 'AttestationSubmission'
+          $ddf = Join-Path $env:RUNNER_TEMP 'AodFreeze-attestation.ddf'
+          $cab = Join-Path $PWD 'AodFreeze-attestation.cab'
 
-          if (-not (Test-Path $path)) {
-            throw "CAT not found: $path"
+          @"
+          .OPTION EXPLICIT
+          .Set CabinetNameTemplate=AodFreeze-attestation.cab
+          .Set DiskDirectoryTemplate=.
+          .Set Cabinet=on
+          .Set Compress=on
+          .Set CompressionType=LZX
+          .Set MaxDiskSize=0
+          .Set SourceDir=$submission
+          amd64\diskflt.sys
+          amd64\diskflt.inf
+          amd64\diskflt.pdb
+          amd64\diskflt.cat
+          "@ |
+            Set-Content $ddf -Encoding ASCII
+
+          Push-Location (Split-Path $cab -Parent)
+
+          & $env:MAKECAB_PATH /F $ddf
+
+          Pop-Location
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "makecab failed with exit code $LASTEXITCODE"
           }
 
-          & $env:SIGNTOOL_PATH `
+          if (-not (Test-Path $cab)) {
+            throw "CAB was not created: $cab"
+          }
+
+      - name: Optional EV-sign attestation CAB
+        shell: pwsh
+        env:
+          EV_PFX_BASE64: ${{ secrets.EV_PFX_BASE64 }}
+          EV_PFX_PASSWORD: ${{ secrets.EV_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if (
+            [string]::IsNullOrWhiteSpace($env:EV_PFX_BASE64) -or
+            [string]::IsNullOrWhiteSpace($env:EV_PFX_PASSWORD)
+          ) {
+            Write-Host 'EV secrets are not configured; leaving CAB unsigned for manual EV signing.'
+            exit 0
+          }
+
+          $pfx = Join-Path `
+            $env:RUNNER_TEMP `
+            'aodfreeze-ev.pfx'
+
+          [IO.File]::WriteAllBytes(
+            $pfx,
+            [Convert]::FromBase64String($env:EV_PFX_BASE64)
+          )
+
+          $securePassword = ConvertTo-SecureString `
+            $env:EV_PFX_PASSWORD `
+            -AsPlainText `
+            -Force
+
+          $cert = Import-PfxCertificate `
+            -FilePath $pfx `
+            -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -Password $securePassword
+
+          if (-not $cert) {
+            throw 'EV certificate import failed.'
+          }
+
+          $signtool = Get-ChildItem `
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+            -Filter signtool.exe `
+            -Recurse `
+            -File |
+            Where-Object {
+              $_.FullName -match '\\x64\\signtool\.exe$'
+            } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+
+          if (-not $signtool) {
+            throw 'signtool.exe not found.'
+          }
+
+          & $signtool `
             sign `
             /v `
             /fd sha256 `
-            /sm `
-            /s My `
-            /sha1 $env:CERT_THUMBPRINT `
-            $path
+            /tr https://timestamp.digicert.com `
+            /td sha256 `
+            /sha1 $cert.Thumbprint `
+            'AodFreeze-attestation.cab'
 
           if ($LASTEXITCODE -ne 0) {
-            throw "SignTool failed to sign $path with exit code $LASTEXITCODE"
+            throw "EV CAB signing failed with exit code $LASTEXITCODE"
           }
 
-      - name: Verify signed driver package
+          Write-Host 'EV-signed CAB created: AodFreeze-attestation.cab'
+
+      - name: Create submission README
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-
-          $dist = Join-Path $PWD "DistDriver"
-
-          $inf = Join-Path $dist "diskflt.inf"
-          $cat = Join-Path $dist "diskflt.cat"
-          $sys = Join-Path $dist "diskflt.sys"
-
-          & $env:SIGNTOOL_PATH verify /v /pa $cat
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "CAT signature verification failed for ${cat}"
-          }
-
-          & $env:SIGNTOOL_PATH verify /v /pa /c $cat $inf
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "INF catalog verification failed for ${inf}"
-          }
-
-          & $env:SIGNTOOL_PATH verify /v /pa /c $cat $sys
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "SYS catalog verification failed for ${sys}"
-          }
-
-          & $env:SIGNTOOL_PATH verify /v /pa $sys
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Embedded SYS signature verification failed for ${sys}"
-          }
-
-      - name: Prepare final package
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $package = Join-Path $PWD "AodFreeze-package"
-          $driverDir = Join-Path $package "Driver"
-          $toolsDir = Join-Path $package "Tools"
-
-          if (Test-Path $package) {
-            Remove-Item $package -Recurse -Force
-          }
-
-          New-Item `
-            -ItemType Directory `
-            -Force `
-            -Path $driverDir, $toolsDir |
-            Out-Null
-
-          # Final package layout matches the build-generated INF:
-          # diskflt.sys is at Driver root.
-          Copy-Item `
-            "DistDriver\diskflt.inf" `
-            "$driverDir\diskflt.inf" `
-            -Force
-
-          Copy-Item `
-            "DistDriver\diskflt.cat" `
-            "$driverDir\diskflt.cat" `
-            -Force
-
-          Copy-Item `
-            "DistDriver\diskflt.sys" `
-            "$driverDir\diskflt.sys" `
-            -Force
-
-          $toolCandidates = @(
-            "x64\Release\DiskfltInst.exe",
-            "x64\Release\diskfltmgmt.exe",
-            "x64\Release\DiskfltBufmon.exe",
-            "DiskfltInst\x64\Release\DiskfltInst.exe",
-            "diskfltmgmt\x64\Release\diskfltmgmt.exe",
-            "DiskfltBufmon\x64\Release\DiskfltBufmon.exe"
-          )
-
-          foreach ($candidate in $toolCandidates) {
-            if (Test-Path $candidate) {
-              Copy-Item $candidate $toolsDir -Force
-            }
-          }
-
-          Copy-Item `
-            "AodFreeze-Test.cer" `
-            $package `
-            -Force
 
           @"
-          AodFreeze test-signed driver package
+          AodFreeze Microsoft Attestation Submission
 
-          Target:
-            Windows 11 x64
-            Windows 11 25H2
+          Contents:
+            AodFreeze-attestation.cab
+            AttestationSubmission\amd64\diskflt.sys
+            AttestationSubmission\amd64\diskflt.inf
+            AttestationSubmission\amd64\diskflt.pdb
+            AttestationSubmission\amd64\diskflt.cat
 
-          IMPORTANT:
-            This package uses a test certificate.
+          This build intentionally does NOT create or use a test certificate.
 
-          Before installing on a test machine:
-            1. Disable Secure Boot.
-            2. Open an elevated Command Prompt.
-            3. Run: bcdedit /set testsigning on
-            4. Reboot Windows.
-            5. Install the driver.
+          It is intended for Microsoft Hardware Dev Center attestation signing.
 
-          Public test certificate:
-            AodFreeze-Test.cer
+          Required production flow:
+            1. Sign AodFreeze-attestation.cab with the registered EV certificate.
+            2. Submit the EV-signed CAB in Microsoft Partner Center Hardware.
+            3. Leave test signing disabled in the requested production signature flow.
+            4. Download the Microsoft-signed driver package returned by Microsoft.
+            5. Use the Microsoft-signed diskflt.sys and catalog for deployment.
 
-          The private signing key is NOT included in this package.
+          Do not enable TESTSIGNING for the production-signed package.
           "@ |
-            Set-Content "$package\README.txt" -Encoding UTF8
+            Set-Content 'ATTESTATION-README.txt' -Encoding UTF8
 
-          Write-Host "=== FINAL PACKAGE ==="
-
-          Get-ChildItem $package -Recurse -File |
-            Select-Object FullName, Length
-
-      - name: Final integrity check
+      - name: Final checks
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $package = Join-Path $PWD "AodFreeze-package"
-
           $required = @(
-            "$package\Driver\diskflt.inf",
-            "$package\Driver\diskflt.cat",
-            "$package\Driver\diskflt.sys",
-            "$package\AodFreeze-Test.cer",
-            "$package\README.txt"
+            'AodFreeze-attestation.cab',
+            'AttestationSubmission\amd64\diskflt.sys',
+            'AttestationSubmission\amd64\diskflt.inf',
+            'AttestationSubmission\amd64\diskflt.pdb',
+            'AttestationSubmission\amd64\diskflt.cat',
+            'ATTESTATION-README.txt'
           )
 
           foreach ($file in $required) {
-
             if (-not (Test-Path $file)) {
-              throw "Required package file missing: $file"
+              throw "Required output missing: $file"
             }
 
             Write-Host "OK: $file"
           }
 
+          Write-Host '=== HASHES ==='
+
           Get-FileHash `
-            "$package\Driver\diskflt.sys" `
+            'AttestationSubmission\amd64\diskflt.sys' `
             -Algorithm SHA256
 
           Get-FileHash `
-            "$package\Driver\diskflt.cat" `
+            'AttestationSubmission\amd64\diskflt.cat' `
             -Algorithm SHA256
 
           Get-FileHash `
-            "$package\Driver\diskflt.inf" `
+            'AodFreeze-attestation.cab' `
             -Algorithm SHA256
 
-      - name: Create ZIP
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $package = Join-Path $PWD "AodFreeze-package"
-          $zip = Join-Path $PWD "AodFreeze-package.zip"
-
-          if (Test-Path $zip) {
-            Remove-Item $zip -Force
-          }
-
-          Compress-Archive `
-            -Path "$package\*" `
-            -DestinationPath $zip `
-            -CompressionLevel Optimal
-
-          Get-FileHash $zip -Algorithm SHA256
-
-      - name: Upload package
+      - name: Upload attestation artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: AodFreeze-package
+          name: AodFreeze-attestation
           path: |
-            AodFreeze-package.zip
-            AodFreeze-package
+            AodFreeze-attestation.cab
+            AttestationSubmission
+            ATTESTATION-README.txt
           if-no-files-found: error
           retention-days: 14
