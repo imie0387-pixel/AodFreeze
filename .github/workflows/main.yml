@@ -58,7 +58,7 @@ jobs:
               $cl2 = Join-Path $dir.FullName "bin\Hostx64\x64\cl.exe"
               $afx = Join-Path $dir.FullName "atlmfc\include\afxwin.h"
 
-              if ((Test-Path $cl1 -or Test-Path $cl2) -and (Test-Path $afx)) {
+              if (((Test-Path $cl1) -or (Test-Path $cl2)) -and (Test-Path $afx)) {
                 return $dir.FullName
               }
             }
@@ -168,7 +168,6 @@ jobs:
           Copy-Item $sys $dist -Force
           Copy-Item $inf $dist -Force
           Copy-Item $cat $dist -Force
-
           Copy-Item $sys "$dist\amd64\diskflt.sys" -Force
           Copy-Item $sys "$dist\i386\diskflt.sys" -Force
 
@@ -195,19 +194,18 @@ jobs:
             throw "Solution build failed with exit code $LASTEXITCODE"
           }
 
-      - name: Prepare Microsoft attestation submission
+      - name: Prepare AttestationSource
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $submission = Join-Path $PWD "AttestationSubmission"
+          $source = Join-Path $PWD "AttestationSource"
 
-          if (Test-Path $submission) {
-            Remove-Item $submission -Recurse -Force
+          if (Test-Path $source) {
+            Remove-Item $source -Recurse -Force
           }
 
-          New-Item -ItemType Directory -Force -Path $submission |
-            Out-Null
+          New-Item -ItemType Directory -Force -Path $source | Out-Null
 
           $sys = Join-Path $PWD "DiskFilter\x64\Release\diskflt.sys"
           $pdb = Join-Path $PWD "DiskFilter\x64\Release\diskflt.pdb"
@@ -219,13 +217,11 @@ jobs:
             }
           }
 
-          Copy-Item $sys $submission -Force
-          Copy-Item $pdb $submission -Force
-          Copy-Item $inf $submission -Force
+          Copy-Item $sys $source -Force
+          Copy-Item $pdb $source -Force
+          Copy-Item $inf $source -Force
 
-          Write-Host "=== ATTESTATION INPUT ==="
-
-          Get-ChildItem $submission -File |
+          Get-ChildItem $source -File |
             Select-Object Name, Length
 
       - name: Locate Inf2Cat
@@ -262,10 +258,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $submission = Join-Path $PWD "AttestationSubmission"
+          $source = Join-Path $PWD "AttestationSource"
 
           & $env:INF2CAT_PATH `
-            /driver:"$submission" `
+            /driver:"$source" `
             /os:10_x64 `
             /verbose
 
@@ -273,13 +269,12 @@ jobs:
             throw "Inf2Cat failed with exit code $LASTEXITCODE"
           }
 
-          $cat = Join-Path $submission "diskflt.cat"
+          $cat = Join-Path $source "diskflt.cat"
 
           if (-not (Test-Path $cat)) {
             throw "Catalog was not generated: $cat"
           }
 
-          Write-Host "Generated catalog:"
           Get-Item $cat |
             Select-Object FullName, Length
 
@@ -312,28 +307,37 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $submission = Join-Path $PWD "AttestationSubmission"
-          $cab = Join-Path $PWD "AodFreeze-attestation.cab"
+          $source = Join-Path $PWD "AttestationSource"
           $ddf = Join-Path $PWD "AttestationSubmission.ddf"
+          $cabRoot = Join-Path $PWD "CabOutput"
+
+          if (Test-Path $cabRoot) {
+            Remove-Item $cabRoot -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Force -Path $cabRoot | Out-Null
 
           @"
           .OPTION EXPLICIT
-          .Set CabinetNameTemplate=AodFreeze-attestation.cab
-          .Set DiskDirectoryTemplate=.
-          .Set Cabinet=on
-          .Set Compress=on
-          .Set CompressionType=MSZIP
           .Set CabinetFileCountThreshold=0
           .Set FolderFileCountThreshold=0
           .Set FolderSizeThreshold=0
+          .Set MaxCabinetSize=0
+          .Set MaxDiskFileCount=0
           .Set MaxDiskSize=0
-          diskflt.sys
-          diskflt.inf
-          diskflt.pdb
-          diskflt.cat
+          .Set CompressionType=MSZIP
+          .Set Cabinet=on
+          .Set Compress=on
+          .Set CabinetNameTemplate=AodFreeze-attestation.cab
+          .Set DiskDirectoryTemplate=CabOutput
+          .Set DestinationDir=AodFreeze
+          $source\diskflt.inf
+          $source\diskflt.sys
+          $source\diskflt.pdb
+          $source\diskflt.cat
           "@ | Set-Content $ddf -Encoding ASCII
 
-          Push-Location $submission
+          Push-Location $PWD
 
           & $env:MAKECAB_PATH /F $ddf
 
@@ -345,13 +349,96 @@ jobs:
             throw "MakeCab failed with exit code $exitCode"
           }
 
-          if (-not (Test-Path $cab)) {
-            throw "CAB was not created: $cab"
+          $cab = Get-ChildItem `
+            $cabRoot `
+            -Filter "AodFreeze-attestation.cab" `
+            -Recurse `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          if (-not $cab) {
+            throw "CAB was not created."
           }
 
-          Write-Host "CAB created:"
-          Get-Item $cab |
+          $finalCab = Join-Path $PWD "AodFreeze-attestation.cab"
+
+          Copy-Item $cab.FullName $finalCab -Force
+
+          Write-Host "CAB:"
+          Get-Item $finalCab |
             Select-Object FullName, Length
+
+      - name: Verify CAB structure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $cab = Join-Path $PWD "AodFreeze-attestation.cab"
+
+          if (-not (Test-Path $cab)) {
+            throw "CAB not found: $cab"
+          }
+
+          $expand = Get-Command expand.exe -ErrorAction SilentlyContinue
+
+          if (-not $expand) {
+            throw "expand.exe not found."
+          }
+
+          $verify = Join-Path $env:RUNNER_TEMP "cab-verify"
+
+          if (Test-Path $verify) {
+            Remove-Item $verify -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Force -Path $verify | Out-Null
+
+          & $expand.Source "-F:*" $cab $verify
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "CAB extraction failed with exit code $LASTEXITCODE"
+          }
+
+          $files = Get-ChildItem $verify -Recurse -File
+
+          if (-not $files) {
+            throw "CAB contains no files."
+          }
+
+          Write-Host "=== CAB CONTENTS ==="
+
+          $files |
+            ForEach-Object {
+              $_.FullName.Substring($verify.Length).TrimStart('\')
+            }
+
+          $rootFiles = Get-ChildItem $verify -File
+
+          if ($rootFiles.Count -ne 0) {
+            throw "CAB contains files at root level."
+          }
+
+          $driverDir = Join-Path $verify "AodFreeze"
+
+          if (-not (Test-Path $driverDir)) {
+            throw "CAB driver directory missing: AodFreeze"
+          }
+
+          foreach ($name in @(
+            "diskflt.inf",
+            "diskflt.sys",
+            "diskflt.pdb",
+            "diskflt.cat"
+          )) {
+            $path = Join-Path $driverDir $name
+
+            if (-not (Test-Path $path)) {
+              throw "CAB missing: AodFreeze\$name"
+            }
+          }
+
+          Write-Host "CAB structure OK."
 
       - name: Optional EV-sign attestation CAB
         shell: pwsh
@@ -362,12 +449,12 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           if ([string]::IsNullOrWhiteSpace($env:EV_PFX_BASE64)) {
-            Write-Host "EV_PFX_BASE64 not configured. CAB remains unsigned for manual EV signing."
+            Write-Host "EV certificate not configured. CAB remains unsigned."
             exit 0
           }
 
           if ([string]::IsNullOrWhiteSpace($env:EV_PFX_PASSWORD)) {
-            throw "EV_PFX_PASSWORD is required when EV_PFX_BASE64 is configured."
+            throw "EV_PFX_PASSWORD is required."
           }
 
           $signtool = "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"
@@ -431,7 +518,7 @@ jobs:
             $cab
 
           if ($LASTEXITCODE -ne 0) {
-            throw "EV CAB signature verification failed."
+            throw "EV CAB verification failed."
           }
 
           Remove-Item $pfx -Force -ErrorAction SilentlyContinue
@@ -444,22 +531,18 @@ jobs:
           @"
           AodFreeze Microsoft Attestation Submission
 
-          Files:
+          CAB:
             AodFreeze-attestation.cab
 
-          CAB contents:
-            diskflt.sys
-            diskflt.inf
-            diskflt.pdb
-            diskflt.cat
+          Driver package:
+            AodFreeze\
+              diskflt.inf
+              diskflt.sys
+              diskflt.pdb
+              diskflt.cat
 
-          The CAB must be signed with the registered signing certificate
-          before submission to Microsoft Hardware Dev Center.
-
-          After Microsoft signing, download the returned signed driver
-          package from Partner Center.
-
-          Do not use TESTSIGNING for the Microsoft-signed package.
+          The CAB must be EV-signed before submission to Microsoft Hardware Dev Center.
+          Microsoft regenerates the catalog during signing.
           "@ |
             Set-Content "Attestation-README.txt" -Encoding UTF8
 
@@ -468,14 +551,14 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $submission = Join-Path $PWD "AttestationSubmission"
+          $source = Join-Path $PWD "AttestationSource"
           $cab = Join-Path $PWD "AodFreeze-attestation.cab"
 
           foreach ($file in @(
-            "$submission\diskflt.sys",
-            "$submission\diskflt.inf",
-            "$submission\diskflt.pdb",
-            "$submission\diskflt.cat",
+            "$source\diskflt.sys",
+            "$source\diskflt.inf",
+            "$source\diskflt.pdb",
+            "$source\diskflt.cat",
             $cab,
             "$PWD\Attestation-README.txt"
           )) {
@@ -486,12 +569,12 @@ jobs:
             Write-Host "OK: $file"
           }
 
-          Write-Host "=== ATTESTATION DIRECTORY ==="
+          Write-Host "=== ATTESTATION SOURCE ==="
 
-          Get-ChildItem $submission -File |
+          Get-ChildItem $source -File |
             Select-Object Name, Length
 
-          Write-Host "=== CAB HASH ==="
+          Write-Host "=== CAB SHA256 ==="
 
           Get-FileHash $cab -Algorithm SHA256
 
@@ -501,7 +584,7 @@ jobs:
           name: AodFreeze-attestation
           path: |
             AodFreeze-attestation.cab
-            AttestationSubmission
+            AttestationSource
             Attestation-README.txt
           if-no-files-found: error
           retention-days: 14
